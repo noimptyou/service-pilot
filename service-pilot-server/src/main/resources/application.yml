@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: service-pilot
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/service_pilot}
+    username: ${DB_USERNAME:service_pilot}
+    password: ${DB_PASSWORD:service_pilot_dev}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  ai:
+    model:
+      chat: none
+      embedding: none
+      image: none
+      moderation: none
+      audio:
+        speech: none
+        transcription: none
+    vectorstore:
+      type: none
+      pgvector:
+        initialize-schema: false
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,modulith
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    com.servicepilot: INFO

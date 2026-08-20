@@ -1,0 +1,14 @@
+.idea/
+.downloads/
+.env
+*.log
+
+service-pilot-server/target/
+service-pilot-server/.classpath
+service-pilot-server/.project
+service-pilot-server/.settings/
+
+service-pilot-web/node_modules/
+service-pilot-web/dist/
+service-pilot-web/.vite/
+

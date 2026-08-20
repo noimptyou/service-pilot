@@ -1,0 +1,22 @@
+spring:
+  config:
+    activate:
+      on-profile: ai
+  ai:
+    model:
+      chat: openai
+      embedding: openai
+    openai:
+      api-key: ${AI_API_KEY}
+      base-url: ${AI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${AI_CHAT_MODEL}
+          temperature: 0.2
+      embedding:
+        options:
+          model: ${AI_EMBEDDING_MODEL}
+    vectorstore:
+      type: pgvector
+      pgvector:
+        initialize-schema: true

@@ -1,0 +1,24 @@
+name: service-pilot
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg17
+    container_name: service-pilot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-service_pilot}
+      POSTGRES_USER: ${POSTGRES_USER:-service_pilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-service_pilot_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - service-pilot-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-service_pilot} -d ${POSTGRES_DB:-service_pilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  service-pilot-postgres-data:
+
