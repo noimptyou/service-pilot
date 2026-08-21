@@ -8,6 +8,7 @@ ServicePilot is a modular Spring Boot customer-service Agent project. The first 
 - Spring Boot 4.1
 - Spring AI 2.0
 - Spring Modulith 2.1
+- MyBatis-Plus 3.5
 - PostgreSQL 17 + pgvector
 - Vue 3 + TypeScript + Vite
 - pnpm
