@@ -40,12 +40,7 @@ public class ConversationService {
 
         customerSessionMapper.insert(session);
 
-        return new SessionResponse(
-                session.getId(),
-                session.getCustomerName(),
-                session.getStatus(),
-                session.getCreatedAt()
-        );
+        return toSessionResponse(session);
     }
 
     @Transactional
@@ -80,6 +75,17 @@ public class ConversationService {
                 .toList();
     }
 
+    @Transactional
+    public SessionResponse closeSession(Long sessionId) {
+        CustomerSession session = requireSession(sessionId);
+        if (session.getStatus() != SessionStatus.CLOSED) {
+            session.setStatus(SessionStatus.CLOSED);
+            session.setUpdatedAt(OffsetDateTime.now());
+            customerSessionMapper.updateById(session);
+        }
+        return toSessionResponse(session);
+    }
+
     private CustomerSession requireSession(Long sessionId) {
         CustomerSession session = customerSessionMapper.selectById(sessionId);
         if (session == null) {
@@ -95,6 +101,15 @@ public class ConversationService {
                 message.getSenderType(),
                 message.getContent(),
                 message.getCreatedAt()
+        );
+    }
+
+    private SessionResponse toSessionResponse(CustomerSession session) {
+        return new SessionResponse(
+                session.getId(),
+                session.getCustomerName(),
+                session.getStatus(),
+                session.getCreatedAt()
         );
     }
 }

@@ -9,6 +9,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -42,5 +43,10 @@ public class ConversationController {
     @GetMapping("/{sessionId}/messages")
     public List<MessageResponse> getMessages(@PathVariable Long sessionId) {
         return conversationService.getMessages(sessionId);
+    }
+
+    @PatchMapping("/{sessionId}/close")
+    public SessionResponse closeSession(@PathVariable Long sessionId) {
+        return conversationService.closeSession(sessionId);
     }
 }

@@ -20,6 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -208,6 +209,47 @@ class ServicePilotApplicationTests {
 	@Test
 	void returnsNotFoundWhenGettingMessagesForMissingSession() throws Exception {
 		mockMvc.perform(get("/api/conversations/{sessionId}/messages", Long.MAX_VALUE))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void closesSessionAndRejectsFurtherMessages() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Close Session Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(patch("/api/conversations/{sessionId}/close", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.id").value(session.getId()))
+				.andExpect(jsonPath("$.status").value("CLOSED"));
+
+		assertThat(customerSessionMapper.selectById(session.getId()).getStatus())
+				.isEqualTo(SessionStatus.CLOSED);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Can I still send?"}
+							"""))
+				.andExpect(status().isConflict());
+	}
+
+	@Test
+	void closingSessionIsIdempotent() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Repeated Close Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(patch("/api/conversations/{sessionId}/close", session.getId()))
+				.andExpect(status().isOk());
+		mockMvc.perform(patch("/api/conversations/{sessionId}/close", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("CLOSED"));
+	}
+
+	@Test
+	void returnsNotFoundWhenClosingMissingSession() throws Exception {
+		mockMvc.perform(patch("/api/conversations/{sessionId}/close", Long.MAX_VALUE))
 				.andExpect(status().isNotFound());
 	}
 
