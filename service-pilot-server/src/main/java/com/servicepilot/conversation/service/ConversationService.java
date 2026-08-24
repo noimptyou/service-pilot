@@ -1,5 +1,6 @@
 package com.servicepilot.conversation.service;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
 import com.servicepilot.conversation.domain.SenderType;
@@ -17,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -48,10 +50,7 @@ public class ConversationService {
 
     @Transactional
     public MessageResponse sendMessage(Long sessionId, SendMessageRequest request) {
-        CustomerSession session = customerSessionMapper.selectById(sessionId);
-        if (session == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
-        }
+        CustomerSession session = requireSession(sessionId);
         if (session.getStatus() == SessionStatus.CLOSED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "会话已结束，不能继续发送消息");
         }
@@ -64,6 +63,32 @@ public class ConversationService {
 
         chatMessageMapper.insert(message);
 
+        return toMessageResponse(message);
+    }
+
+    @Transactional(readOnly = true)
+    public List<MessageResponse> getMessages(Long sessionId) {
+        requireSession(sessionId);
+
+        return chatMessageMapper.selectList(
+                        Wrappers.<ChatMessage>lambdaQuery()
+                                .eq(ChatMessage::getSessionId, sessionId)
+                                .orderByAsc(ChatMessage::getCreatedAt)
+                                .orderByAsc(ChatMessage::getId)
+                ).stream()
+                .map(this::toMessageResponse)
+                .toList();
+    }
+
+    private CustomerSession requireSession(Long sessionId) {
+        CustomerSession session = customerSessionMapper.selectById(sessionId);
+        if (session == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
+        }
+        return session;
+    }
+
+    private MessageResponse toMessageResponse(ChatMessage message) {
         return new MessageResponse(
                 message.getId(),
                 message.getSessionId(),

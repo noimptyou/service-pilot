@@ -19,6 +19,7 @@ import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -165,6 +166,49 @@ class ServicePilotApplicationTests {
 							{"content":"Hello"}
 							"""))
 				.andExpect(status().isConflict());
+	}
+
+	@Test
+	void getsConversationMessagesInOrder() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("History Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"First message"}
+							"""))
+				.andExpect(status().isCreated());
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Second message"}
+							"""))
+				.andExpect(status().isCreated());
+
+		mockMvc.perform(get("/api/conversations/{sessionId}/messages", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.length()").value(2))
+				.andExpect(jsonPath("$[0].content").value("First message"))
+				.andExpect(jsonPath("$[1].content").value("Second message"));
+	}
+
+	@Test
+	void returnsEmptyMessageListForNewSession() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Empty History Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(get("/api/conversations/{sessionId}/messages", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$").isEmpty());
+	}
+
+	@Test
+	void returnsNotFoundWhenGettingMessagesForMissingSession() throws Exception {
+		mockMvc.perform(get("/api/conversations/{sessionId}/messages", Long.MAX_VALUE))
+				.andExpect(status().isNotFound());
 	}
 
 	@Test
