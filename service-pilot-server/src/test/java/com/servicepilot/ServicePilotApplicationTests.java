@@ -108,6 +108,66 @@ class ServicePilotApplicationTests {
 	}
 
 	@Test
+	void sendsCustomerMessageThroughHttpApi() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Wang Wu");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Where is my order?"}
+							"""))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.id").isNumber())
+				.andExpect(jsonPath("$.sessionId").value(session.getId()))
+				.andExpect(jsonPath("$.senderType").value("CUSTOMER"))
+				.andExpect(jsonPath("$.content").value("Where is my order?"))
+				.andExpect(jsonPath("$.createdAt").isNotEmpty());
+	}
+
+	@Test
+	void rejectsBlankMessage() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Blank Message Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":""}
+							"""))
+				.andExpect(status().isBadRequest());
+	}
+
+	@Test
+	void returnsNotFoundWhenSendingMessageToMissingSession() throws Exception {
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", Long.MAX_VALUE)
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Hello"}
+							"""))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void rejectsMessageForClosedSession() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Closed Session Tester");
+		SessionResponse response = conversationService.createSession(createRequest);
+		CustomerSession session = customerSessionMapper.selectById(response.getId());
+		session.setStatus(SessionStatus.CLOSED);
+		customerSessionMapper.updateById(session);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Hello"}
+							"""))
+				.andExpect(status().isConflict());
+	}
+
+	@Test
 	void modularStructureIsValid() {
 		ApplicationModules.of(ServicePilotApplication.class).verify();
 	}
