@@ -1,6 +1,7 @@
 package com.servicepilot.conversation.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.servicepilot.agent.AgentConversationMessage;
 import com.servicepilot.agent.CustomerSupportAgent;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
@@ -17,20 +18,27 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @Service
 @RequiredArgsConstructor
 public class ConversationService {
 
+    private static final int AI_CONTEXT_MESSAGE_LIMIT = 20;
+
     private final CustomerSessionMapper customerSessionMapper;
 
     private final ChatMessageMapper chatMessageMapper;
 
     private final CustomerSupportAgent customerSupportAgent;
+
+    private final TransactionTemplate transactionTemplate;
 
     @Transactional
     public SessionResponse createSession(CreateSessionRequest request) {
@@ -53,16 +61,30 @@ public class ConversationService {
         return toMessageResponse(saveMessage(sessionId, SenderType.CUSTOMER, request.getContent()));
     }
 
-    @Transactional
     public ChatReplyResponse chat(Long sessionId, SendMessageRequest request) {
-        requireOpenSession(sessionId);
+        ChatContext chatContext = transactionTemplate.execute(status -> {
+            requireOpenSession(sessionId);
+            ChatMessage customerMessage = saveMessage(
+                    sessionId,
+                    SenderType.CUSTOMER,
+                    request.getContent()
+            );
+            return new ChatContext(customerMessage, loadAgentContext(sessionId));
+        });
+        if (chatContext == null) {
+            throw new IllegalStateException("保存客户消息失败");
+        }
 
-        ChatMessage customerMessage = saveMessage(sessionId, SenderType.CUSTOMER, request.getContent());
-        String answer = customerSupportAgent.reply(customerMessage.getContent());
-        ChatMessage aiMessage = saveMessage(sessionId, SenderType.AI, answer);
+        String answer = customerSupportAgent.reply(chatContext.conversation());
+        ChatMessage aiMessage = transactionTemplate.execute(
+                status -> saveMessage(sessionId, SenderType.AI, answer)
+        );
+        if (aiMessage == null) {
+            throw new IllegalStateException("保存AI回复失败");
+        }
 
         return new ChatReplyResponse(
-                toMessageResponse(customerMessage),
+                toMessageResponse(chatContext.customerMessage()),
                 toMessageResponse(aiMessage)
         );
     }
@@ -118,6 +140,29 @@ public class ConversationService {
         return message;
     }
 
+    private List<AgentConversationMessage> loadAgentContext(Long sessionId) {
+        List<ChatMessage> messages = new ArrayList<>(chatMessageMapper.selectList(
+                Wrappers.<ChatMessage>lambdaQuery()
+                        .eq(ChatMessage::getSessionId, sessionId)
+                        .in(ChatMessage::getSenderType, SenderType.CUSTOMER, SenderType.AGENT, SenderType.AI)
+                        .orderByDesc(ChatMessage::getCreatedAt)
+                        .orderByDesc(ChatMessage::getId)
+                        .last("LIMIT " + AI_CONTEXT_MESSAGE_LIMIT)
+        ));
+        Collections.reverse(messages);
+
+        return messages.stream()
+                .map(this::toAgentConversationMessage)
+                .toList();
+    }
+
+    private AgentConversationMessage toAgentConversationMessage(ChatMessage message) {
+        AgentConversationMessage.Role role = message.getSenderType() == SenderType.CUSTOMER
+                ? AgentConversationMessage.Role.USER
+                : AgentConversationMessage.Role.ASSISTANT;
+        return new AgentConversationMessage(role, message.getContent());
+    }
+
     private MessageResponse toMessageResponse(ChatMessage message) {
         return new MessageResponse(
                 message.getId(),
@@ -135,5 +180,11 @@ public class ConversationService {
                 session.getStatus(),
                 session.getCreatedAt()
         );
+    }
+
+    private record ChatContext(
+            ChatMessage customerMessage,
+            List<AgentConversationMessage> conversation
+    ) {
     }
 }

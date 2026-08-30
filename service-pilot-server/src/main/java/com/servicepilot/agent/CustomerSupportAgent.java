@@ -1,10 +1,15 @@
 package com.servicepilot.agent;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
+
+import java.util.List;
 
 @Component
 public class CustomerSupportAgent {
@@ -22,18 +27,22 @@ public class CustomerSupportAgent {
         this.chatClientBuilderProvider = chatClientBuilderProvider;
     }
 
-    public String reply(String customerMessage) {
+    public String reply(List<AgentConversationMessage> conversation) {
         ChatClient.Builder builder = chatClientBuilderProvider.getIfAvailable();
         if (builder == null) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "AI客服未启用");
         }
 
         try {
+            List<Message> messages = conversation.stream()
+                    .map(this::toSpringAiMessage)
+                    .toList();
+
             String answer = builder.clone()
                     .defaultSystem(SYSTEM_PROMPT)
                     .build()
                     .prompt()
-                    .user(customerMessage)
+                    .messages(messages)
                     .call()
                     .content();
 
@@ -46,5 +55,12 @@ public class CustomerSupportAgent {
         } catch (RuntimeException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "AI客服暂时无法回复", exception);
         }
+    }
+
+    private Message toSpringAiMessage(AgentConversationMessage message) {
+        return switch (message.role()) {
+            case USER -> new UserMessage(message.content());
+            case ASSISTANT -> new AssistantMessage(message.content());
+        };
     }
 }

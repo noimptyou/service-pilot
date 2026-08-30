@@ -1,6 +1,7 @@
 package com.servicepilot;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.servicepilot.agent.AgentConversationMessage;
 import com.servicepilot.agent.CustomerSupportAgent;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
@@ -12,18 +13,26 @@ import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
 import com.servicepilot.conversation.service.ConversationService;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -268,8 +277,10 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply("Do you support returns?"))
-				.thenReturn("Yes, eligible products can be returned.");
+		when(customerSupportAgent.reply(anyList())).thenAnswer(invocation -> {
+			assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+			return "Yes, eligible products can be returned.";
+		});
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
 					.contentType(MediaType.APPLICATION_JSON)
@@ -290,6 +301,66 @@ class ServicePilotApplicationTests {
 		);
 		assertThat(messages).extracting(ChatMessage::getSenderType)
 				.containsExactly(SenderType.CUSTOMER, SenderType.AI);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void sendsRecentConversationHistoryToAi() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Multi-turn Chat Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+		when(customerSupportAgent.reply(anyList()))
+				.thenReturn("Your order number is A100.", "I remember that your order number is A100.");
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"My order number is A100."}
+							"""))
+				.andExpect(status().isOk());
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"What is my order number?"}
+							"""))
+				.andExpect(status().isOk());
+
+		ArgumentCaptor<List<AgentConversationMessage>> contextCaptor =
+				ArgumentCaptor.forClass(List.class);
+		verify(customerSupportAgent, times(2)).reply(contextCaptor.capture());
+
+		List<AgentConversationMessage> secondContext = contextCaptor.getAllValues().get(1);
+		assertThat(secondContext)
+				.extracting(AgentConversationMessage::role, AgentConversationMessage::content)
+				.containsExactly(
+						tuple(AgentConversationMessage.Role.USER, "My order number is A100."),
+						tuple(AgentConversationMessage.Role.ASSISTANT, "Your order number is A100."),
+						tuple(AgentConversationMessage.Role.USER, "What is my order number?")
+				);
+	}
+
+	@Test
+	void keepsCustomerMessageWhenAiCallFails() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("AI Failure Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+		when(customerSupportAgent.reply(anyList()))
+				.thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "AI客服暂时无法回复"));
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Please keep this message."}
+							"""))
+				.andExpect(status().isBadGateway());
+
+		List<ChatMessage> messages = chatMessageMapper.selectList(
+				Wrappers.<ChatMessage>lambdaQuery()
+						.eq(ChatMessage::getSessionId, session.getId())
+						.orderByAsc(ChatMessage::getId)
+		);
+		assertThat(messages).extracting(ChatMessage::getSenderType, ChatMessage::getContent)
+				.containsExactly(tuple(SenderType.CUSTOMER, "Please keep this message."));
 	}
 
 	@Test

@@ -1,8 +1,8 @@
 # ServicePilot 项目进度
 
-> 最后更新：2026-08-25  
+> 最后更新：2026-08-30
 > 当前分支：`master`  
-> 当前阶段：AI 自动回复代码已完成，等待百炼真实调用验证
+> 当前阶段：多轮对话上下文与 AI 调用事务优化已完成，准备开发 RAG 知识文档入库
 
 ## 项目目标
 
@@ -40,7 +40,7 @@ com.servicepilot
 │  ├─ mapper               MyBatis-Plus 数据访问
 │  ├─ domain               数据库实体和枚举
 │  └─ dto                  请求与响应对象
-├─ agent                   Agent 编排模块（待开发）
+├─ agent                   Agent 编排模块（已完成基础对话与多轮上下文）
 ├─ knowledge               RAG 知识库模块（待开发）
 ├─ order                   订单工具模块（待开发）
 └─ config                  全局配置
@@ -122,6 +122,10 @@ POST /api/conversations/{sessionId}/chat
 - 使用 `ChatReplyResponse` 同时返回两条消息。
 - 会话不存在返回 HTTP 404，已关闭返回 HTTP 409，空问题返回 HTTP 400。
 - 模型未启用返回 HTTP 503，模型请求失败或空回复返回 HTTP 502。
+- 从 `chat_message` 读取同一会话最近 20 条有效消息作为模型上下文。
+- 将客户消息映射为 `USER`，将 AI/人工客服消息映射为 `ASSISTANT`。
+- 数据库事务仅负责保存或读取消息，调用百炼时不保持数据库事务。
+- 百炼调用失败时保留已经接收的客户消息，避免问题内容被事务回滚。
 
 ## AI 配置状态
 
@@ -131,7 +135,8 @@ POST /api/conversations/{sessionId}/chat
 - `AI_EMBEDDING_MODEL` 控制向量模型，计划使用 `text-embedding-v4`。
 - IDEA 使用 Java 21，并启用 `ai` Profile。
 - 2026-08-24 已验证 AI Profile 启动成功：数据库连接、Flyway V4、pgvector 初始化和 8080 端口均正常。
-- AI 自动回复接口已经实现并通过模拟模型测试；API Key 和百炼模型的真实请求仍需手动完成端到端验证。
+- 2026-08-25 已完成百炼真实请求验证：成功生成中文 AI 回复，并持久化 `CUSTOMER` 和 `AI` 两条消息。
+- 2026-08-30 已完成百炼真实多轮验证：同一会话第二轮能够正确回忆第一轮提供的订单编号。
 
 需要的本地变量名称：
 
@@ -149,16 +154,20 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 20 个测试，覆盖：
+当前测试类包含 22 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
 - 查询聊天记录、排序、空记录和会话不存在。
 - 结束会话、重复结束、会话不存在和关闭后禁止发消息。
 - AI 回复的双消息持久化、参数校验、会话不存在和关闭后禁止调用模型。
+- 多轮历史消息按角色和时间顺序传递给 AI。
+- 调用 AI 时不存在活动数据库事务，AI 失败后客户消息仍然保留。
 - Spring Modulith 模块结构。
 
-2026-08-25 使用 Java 21 执行全量测试：20 个测试全部通过，0 失败、0 错误。
+2026-08-30 使用 Java 21 执行全量测试：22 个测试全部通过，0 失败、0 错误。
+
+2026-08-30 完成百炼真实多轮测试：同一 `sessionId` 连续对话，第二轮正确返回第一轮提供的订单编号；4 条 `CUSTOMER`/`AI` 消息均成功持久化。
 
 ```powershell
 cd D:\agent\service-pilot-server
@@ -167,7 +176,7 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-当前第一步：**完成百炼真实调用的端到端验证**。
+当前第一步：**开发 RAG 知识文档入库**。
 
 已实现接口：
 
@@ -175,47 +184,50 @@ cd D:\agent\service-pilot-server
 POST /api/conversations/{sessionId}/chat
 ```
 
-接口处理流程：
+当前接口处理流程：
 
 ```text
 接收客户问题
-→ 校验会话并保存 CUSTOMER 消息
-→ CustomerSupportAgent 通过 Spring AI 调用百炼
-→ 保存 AI 消息
+→ 短事务校验会话、保存 CUSTOMER 消息并读取最近 20 条上下文
+→ 结束数据库事务
+→ CustomerSupportAgent 将历史消息按 USER/ASSISTANT 角色传给百炼
+→ 短事务保存 AI 消息
 → 返回客户消息和 AI 回复
 ```
 
-已实现内容：
+本阶段已实现内容：
 
-- `agent/CustomerSupportAgent`：封装 `ChatClient` 和客服 System Prompt。
-- `conversation/dto/ChatReplyResponse`：返回客户消息和 AI 消息。
-- `ConversationService` 和 `ConversationController`：编排并提供 `/chat` 接口。
-- 模型模拟测试：验证双消息持久化、参数校验、会话不存在和关闭状态。
+- `AgentConversationMessage`：定义传给模型的 `USER`、`ASSISTANT` 消息角色。
+- `CustomerSupportAgent`：将完整对话上下文转换为 Spring AI 消息列表。
+- `ConversationService`：限制最近 20 条上下文，并使用 `TransactionTemplate` 缩短事务边界。
+- 自动化测试：验证上下文顺序、事务边界和模型失败后的消息保留。
 
-真实验证步骤：
+真实多轮验证结果：
 
-- 使用 IDEA 的 Java 21、`ai` Profile 和本地 `.env` 启动后端。
-- 创建未关闭的客服会话并调用 `/chat`。
-- 确认百炼返回中文回复，数据库保存 `CUSTOMER` 和 `AI` 两条消息。
-- 自动化测试不调用百炼、不消耗 Token；真实验证会消耗少量免费额度。
+- 使用 IDEA 的 Java 21、`ai` Profile 和本地 `.env` 启动后端成功。
+- 第一次通过 `/chat` 告诉 AI 订单编号，第二次使用同一 `sessionId` 询问。
+- 百炼正确回复第一轮提供的订单编号，多轮上下文验证通过。
+- 自动化测试不调用百炼、不消耗 Token；本次真实验证消耗少量免费额度。
 
-真实调用通过后的下一项独立功能：**多轮对话上下文**。
+下一项独立功能：**RAG 知识文档入库**。
 
-后续路线：多轮上下文 → Prompt 完善 → RAG 知识库 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
+后续路线：RAG 文档入库 → 向量检索与引用回答 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
 ## Git 基线
 
-创建本文档前，`master` 与 `origin/master` 均位于：
+当前 `master` 与 `origin/master` 均位于：
 
 ```text
-71af084 实现结束客服会话接口
+6c7731f 实现 AI 客服自动回复接口
 ```
 
-当前工作区包含尚未提交的 AI 自动回复代码、自动化测试和进度文档更新；完成百炼真实调用验证后再提交。
+当前工作区包含尚未提交的多轮上下文、事务边界优化、自动化测试和进度文档更新，已经具备提交条件。
 
 此前主要提交：
 
 ```text
+6c7731f 实现 AI 客服自动回复接口
+3c7b6b5 新增 ServicePilot 项目进度记录
 1170699 实现会话聊天记录查询接口
 321ef78 文档：添加项目协作与 Git 提交规范
 0091e9c 实现客户发送消息接口
