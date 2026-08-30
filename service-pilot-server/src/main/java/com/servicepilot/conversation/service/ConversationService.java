@@ -1,10 +1,12 @@
 package com.servicepilot.conversation.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.servicepilot.agent.CustomerSupportAgent;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
 import com.servicepilot.conversation.domain.SenderType;
 import com.servicepilot.conversation.domain.SessionStatus;
+import com.servicepilot.conversation.dto.ChatReplyResponse;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
 import com.servicepilot.conversation.dto.MessageResponse;
 import com.servicepilot.conversation.dto.SendMessageRequest;
@@ -28,6 +30,8 @@ public class ConversationService {
 
     private final ChatMessageMapper chatMessageMapper;
 
+    private final CustomerSupportAgent customerSupportAgent;
+
     @Transactional
     public SessionResponse createSession(CreateSessionRequest request) {
         OffsetDateTime now = OffsetDateTime.now();
@@ -45,20 +49,22 @@ public class ConversationService {
 
     @Transactional
     public MessageResponse sendMessage(Long sessionId, SendMessageRequest request) {
-        CustomerSession session = requireSession(sessionId);
-        if (session.getStatus() == SessionStatus.CLOSED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "会话已结束，不能继续发送消息");
-        }
+        requireOpenSession(sessionId);
+        return toMessageResponse(saveMessage(sessionId, SenderType.CUSTOMER, request.getContent()));
+    }
 
-        ChatMessage message = new ChatMessage();
-        message.setSessionId(sessionId);
-        message.setSenderType(SenderType.CUSTOMER);
-        message.setContent(request.getContent().trim());
-        message.setCreatedAt(OffsetDateTime.now());
+    @Transactional
+    public ChatReplyResponse chat(Long sessionId, SendMessageRequest request) {
+        requireOpenSession(sessionId);
 
-        chatMessageMapper.insert(message);
+        ChatMessage customerMessage = saveMessage(sessionId, SenderType.CUSTOMER, request.getContent());
+        String answer = customerSupportAgent.reply(customerMessage.getContent());
+        ChatMessage aiMessage = saveMessage(sessionId, SenderType.AI, answer);
 
-        return toMessageResponse(message);
+        return new ChatReplyResponse(
+                toMessageResponse(customerMessage),
+                toMessageResponse(aiMessage)
+        );
     }
 
     @Transactional(readOnly = true)
@@ -92,6 +98,24 @@ public class ConversationService {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "会话不存在");
         }
         return session;
+    }
+
+    private CustomerSession requireOpenSession(Long sessionId) {
+        CustomerSession session = requireSession(sessionId);
+        if (session.getStatus() == SessionStatus.CLOSED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "会话已结束，不能继续发送消息");
+        }
+        return session;
+    }
+
+    private ChatMessage saveMessage(Long sessionId, SenderType senderType, String content) {
+        ChatMessage message = new ChatMessage();
+        message.setSessionId(sessionId);
+        message.setSenderType(senderType);
+        message.setContent(content.trim());
+        message.setCreatedAt(OffsetDateTime.now());
+        chatMessageMapper.insert(message);
+        return message;
     }
 
     private MessageResponse toMessageResponse(ChatMessage message) {

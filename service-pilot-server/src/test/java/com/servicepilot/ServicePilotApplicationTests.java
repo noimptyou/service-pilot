@@ -1,5 +1,7 @@
 package com.servicepilot;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.servicepilot.agent.CustomerSupportAgent;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
 import com.servicepilot.conversation.domain.SenderType;
@@ -16,9 +18,14 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.modulith.core.ApplicationModules;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -41,6 +48,9 @@ class ServicePilotApplicationTests {
 
 	@Autowired
 	private MockMvc mockMvc;
+
+	@MockitoBean
+	private CustomerSupportAgent customerSupportAgent;
 
 	@Test
 	void contextLoads() {
@@ -251,6 +261,80 @@ class ServicePilotApplicationTests {
 	void returnsNotFoundWhenClosingMissingSession() throws Exception {
 		mockMvc.perform(patch("/api/conversations/{sessionId}/close", Long.MAX_VALUE))
 				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void chatsWithAiAndPersistsBothMessages() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("AI Chat Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+		when(customerSupportAgent.reply("Do you support returns?"))
+				.thenReturn("Yes, eligible products can be returned.");
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Do you support returns?"}
+							"""))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.customerMessage.senderType").value("CUSTOMER"))
+				.andExpect(jsonPath("$.customerMessage.content").value("Do you support returns?"))
+				.andExpect(jsonPath("$.aiMessage.senderType").value("AI"))
+				.andExpect(jsonPath("$.aiMessage.content")
+						.value("Yes, eligible products can be returned."));
+
+		List<ChatMessage> messages = chatMessageMapper.selectList(
+				Wrappers.<ChatMessage>lambdaQuery()
+						.eq(ChatMessage::getSessionId, session.getId())
+						.orderByAsc(ChatMessage::getId)
+		);
+		assertThat(messages).extracting(ChatMessage::getSenderType)
+				.containsExactly(SenderType.CUSTOMER, SenderType.AI);
+	}
+
+	@Test
+	void rejectsAiChatForClosedSessionWithoutCallingModel() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Closed AI Chat Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+		conversationService.closeSession(session.getId());
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Can I still chat?"}
+							"""))
+				.andExpect(status().isConflict());
+
+		verifyNoInteractions(customerSupportAgent);
+	}
+
+	@Test
+	void rejectsBlankAiChatMessage() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Blank AI Chat Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":""}
+							"""))
+				.andExpect(status().isBadRequest());
+
+		verifyNoInteractions(customerSupportAgent);
+	}
+
+	@Test
+	void returnsNotFoundWhenAiChatUsesMissingSession() throws Exception {
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", Long.MAX_VALUE)
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Hello"}
+							"""))
+				.andExpect(status().isNotFound());
+
+		verifyNoInteractions(customerSupportAgent);
 	}
 
 	@Test

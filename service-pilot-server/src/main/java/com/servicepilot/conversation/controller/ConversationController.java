@@ -1,5 +1,6 @@
 package com.servicepilot.conversation.controller;
 
+import com.servicepilot.conversation.dto.ChatReplyResponse;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
 import com.servicepilot.conversation.dto.MessageResponse;
 import com.servicepilot.conversation.dto.SendMessageRequest;
@@ -38,6 +39,13 @@ public class ConversationController {
             @PathVariable Long sessionId,
             @Valid @RequestBody SendMessageRequest request) {
         return conversationService.sendMessage(sessionId, request);
+    }
+
+    @PostMapping("/{sessionId}/chat")
+    public ChatReplyResponse chat(
+            @PathVariable Long sessionId,
+            @Valid @RequestBody SendMessageRequest request) {
+        return conversationService.chat(sessionId, request);
     }
 
     @GetMapping("/{sessionId}/messages")

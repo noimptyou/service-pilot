@@ -2,7 +2,7 @@
 
 > 最后更新：2026-08-25  
 > 当前分支：`master`  
-> 当前阶段：基础会话生命周期已完成，准备开发 AI 自动回复
+> 当前阶段：AI 自动回复代码已完成，等待百炼真实调用验证
 
 ## 项目目标
 
@@ -110,6 +110,19 @@ PATCH /api/conversations/{sessionId}/close
 会话状态：`WAITING`、`ACTIVE`、`CLOSED`。  
 消息发送者：`CUSTOMER`、`AGENT`、`AI`、`SYSTEM`。
 
+### AI 自动回复接口
+
+```http
+POST /api/conversations/{sessionId}/chat
+```
+
+- `CustomerSupportAgent` 使用 Spring AI `ChatClient` 调用模型。
+- 使用客服 System Prompt 约束回答风格并减少编造。
+- 保存 `CUSTOMER` 消息和 `AI` 回复。
+- 使用 `ChatReplyResponse` 同时返回两条消息。
+- 会话不存在返回 HTTP 404，已关闭返回 HTTP 409，空问题返回 HTTP 400。
+- 模型未启用返回 HTTP 503，模型请求失败或空回复返回 HTTP 502。
+
 ## AI 配置状态
 
 - 已创建阿里云百炼普通 API Key，真实值仅保存在本地 `.env`。
@@ -118,7 +131,7 @@ PATCH /api/conversations/{sessionId}/close
 - `AI_EMBEDDING_MODEL` 控制向量模型，计划使用 `text-embedding-v4`。
 - IDEA 使用 Java 21，并启用 `ai` Profile。
 - 2026-08-24 已验证 AI Profile 启动成功：数据库连接、Flyway V4、pgvector 初始化和 8080 端口均正常。
-- 尚未实现真实模型调用接口，因此 API Key 和模型请求还未完成端到端验证。
+- AI 自动回复接口已经实现并通过模拟模型测试；API Key 和百炼模型的真实请求仍需手动完成端到端验证。
 
 需要的本地变量名称：
 
@@ -136,15 +149,16 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 16 个测试，覆盖：
+当前测试类包含 20 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
 - 查询聊天记录、排序、空记录和会话不存在。
 - 结束会话、重复结束、会话不存在和关闭后禁止发消息。
+- AI 回复的双消息持久化、参数校验、会话不存在和关闭后禁止调用模型。
 - Spring Modulith 模块结构。
 
-最近一次功能开发后的记录结果：16 个测试全部通过，0 失败、0 错误。
+2026-08-25 使用 Java 21 执行全量测试：20 个测试全部通过，0 失败、0 错误。
 
 ```powershell
 cd D:\agent\service-pilot-server
@@ -153,15 +167,15 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-下一项独立功能：**AI 自动回复**。
+当前第一步：**完成百炼真实调用的端到端验证**。
 
-计划接口：
+已实现接口：
 
 ```http
 POST /api/conversations/{sessionId}/chat
 ```
 
-计划流程：
+接口处理流程：
 
 ```text
 接收客户问题
@@ -171,12 +185,21 @@ POST /api/conversations/{sessionId}/chat
 → 返回客户消息和 AI 回复
 ```
 
-预计新增：
+已实现内容：
 
 - `agent/CustomerSupportAgent`：封装 `ChatClient` 和客服 System Prompt。
 - `conversation/dto/ChatReplyResponse`：返回客户消息和 AI 消息。
 - `ConversationService` 和 `ConversationController`：编排并提供 `/chat` 接口。
-- 模型模拟测试：验证消息持久化、会话异常和模型异常。
+- 模型模拟测试：验证双消息持久化、参数校验、会话不存在和关闭状态。
+
+真实验证步骤：
+
+- 使用 IDEA 的 Java 21、`ai` Profile 和本地 `.env` 启动后端。
+- 创建未关闭的客服会话并调用 `/chat`。
+- 确认百炼返回中文回复，数据库保存 `CUSTOMER` 和 `AI` 两条消息。
+- 自动化测试不调用百炼、不消耗 Token；真实验证会消耗少量免费额度。
+
+真实调用通过后的下一项独立功能：**多轮对话上下文**。
 
 后续路线：多轮上下文 → Prompt 完善 → RAG 知识库 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
@@ -187,6 +210,8 @@ POST /api/conversations/{sessionId}/chat
 ```text
 71af084 实现结束客服会话接口
 ```
+
+当前工作区包含尚未提交的 AI 自动回复代码、自动化测试和进度文档更新；完成百炼真实调用验证后再提交。
 
 此前主要提交：
 
