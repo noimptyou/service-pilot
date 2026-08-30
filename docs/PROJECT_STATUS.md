@@ -2,7 +2,7 @@
 
 > 最后更新：2026-08-30
 > 当前分支：`master`  
-> 当前阶段：多轮对话上下文与 AI 调用事务优化已完成，准备开发 RAG 知识文档入库
+> 当前阶段：管理员 HTTP Basic 认证与 RAG 知识文档入库已完成并通过真实百炼验证
 
 ## 项目目标
 
@@ -41,10 +41,19 @@ com.servicepilot
 │  ├─ domain               数据库实体和枚举
 │  └─ dto                  请求与响应对象
 ├─ agent                   Agent 编排模块（已完成基础对话与多轮上下文）
-├─ knowledge               RAG 知识库模块（待开发）
+├─ knowledge               RAG 知识库模块（已完成文档入库基础功能）
 ├─ order                   订单工具模块（待开发）
 └─ config                  全局配置
 ```
+
+### 开发阶段管理员认证
+
+- 使用 Spring Security HTTP Basic 保护后台管理接口。
+- 管理员账号和密码从 `ADMIN_USERNAME`、`ADMIN_PASSWORD` 环境变量读取。
+- 密码使用 BCrypt 编码后保存在进程内存中，不写入数据库、源码或 Git。
+- 请求采用无状态认证，不创建登录 Session。
+- `/api/knowledge/**` 仅允许 `ADMIN` 角色访问。
+- `/api/conversations/**` 和 `/actuator/health` 保持匿名访问。
 
 ## 已完成内容
 
@@ -58,13 +67,14 @@ com.servicepilot
 - 使用 Spring Modulith 定义 `conversation`、`agent`、`knowledge`、`order` 模块。
 - 配置健康检查：`GET /actuator/health`。
 
-Flyway 已执行到 V4：
+Flyway 已执行到 V5：
 
 ```text
 V1  初始化平台配置
 V2  创建 Spring Modulith 事件记录表
 V3  创建客服会话表和聊天消息表
 V4  调整 Modulith JDBC 事件表结构
+V5  创建知识文档表
 ```
 
 主要数据表：
@@ -75,6 +85,7 @@ V4  调整 Modulith JDBC 事件表结构
 - `event_publication`：Spring Modulith 事件记录。
 - `flyway_schema_history`：Flyway 迁移历史。
 - `vector_store`：后续 RAG 使用的向量表，由 Spring AI 初始化。
+- `knowledge_document`：保存知识文档原文、向量化状态和切片数量。
 
 ### 客服会话接口
 
@@ -127,6 +138,21 @@ POST /api/conversations/{sessionId}/chat
 - 数据库事务仅负责保存或读取消息，调用百炼时不保持数据库事务。
 - 百炼调用失败时保留已经接收的客户消息，避免问题内容被事务回滚。
 
+### RAG 知识文档入库接口
+
+```http
+POST /api/knowledge/documents
+```
+
+- 接收知识标题和原文，并保存到 `knowledge_document`。
+- 使用 Spring AI `TokenTextSplitter` 将原文切成适合向量化的片段。
+- 使用 `EmbeddingModel` 和 `VectorStore` 将切片写入 `vector_store`。
+- 为每个切片保存知识文档 ID、标题、切片序号和来源类型等元数据。
+- 入库成功将文档状态改为 `READY`，失败改为 `FAILED`。
+- 调用外部向量模型时不保持数据库事务，避免长事务占用连接。
+- 知识上传属于后台管理功能，接口要求身份认证，不匿名开放。
+- 已接入开发阶段管理员 HTTP Basic 认证，可使用管理员账号进行真实入库测试。
+
 ## AI 配置状态
 
 - 已创建阿里云百炼普通 API Key，真实值仅保存在本地 `.env`。
@@ -137,6 +163,7 @@ POST /api/conversations/{sessionId}/chat
 - 2026-08-24 已验证 AI Profile 启动成功：数据库连接、Flyway V4、pgvector 初始化和 8080 端口均正常。
 - 2026-08-25 已完成百炼真实请求验证：成功生成中文 AI 回复，并持久化 `CUSTOMER` 和 `AI` 两条消息。
 - 2026-08-30 已完成百炼真实多轮验证：同一会话第二轮能够正确回忆第一轮提供的订单编号。
+- 已确认本地 `vector_store.embedding` 为 1024 维，与 `text-embedding-v4` 默认维度一致。
 
 需要的本地变量名称：
 
@@ -154,7 +181,7 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 22 个测试，覆盖：
+当前测试类包含 29 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
@@ -163,9 +190,14 @@ SPRING_PROFILES_ACTIVE=ai
 - AI 回复的双消息持久化、参数校验、会话不存在和关闭后禁止调用模型。
 - 多轮历史消息按角色和时间顺序传递给 AI。
 - 调用 AI 时不存在活动数据库事务，AI 失败后客户消息仍然保留。
+- 知识文档创建、文本切片、向量写入和元数据保存。
+- 空知识内容校验、向量写入失败状态以及匿名访问拒绝。
+- 正确管理员账号允许访问、错误密码返回 401、非管理员用户返回 403。
 - Spring Modulith 模块结构。
 
-2026-08-30 使用 Java 21 执行全量测试：22 个测试全部通过，0 失败、0 错误。
+2026-08-30 使用 Java 21.0.9 执行全量测试：29 个测试全部通过，0 失败、0 错误；Flyway V5 在 Testcontainers PostgreSQL/pgvector 中成功执行。
+
+2026-08-30 完成真实知识入库测试：管理员认证成功，知识文档状态为 `READY`、切片数量为 1，百炼 `text-embedding-v4` 生成 1024 维向量并成功写入 `vector_store`；元数据中的文档 ID、标题、来源类型和切片序号均正确。
 
 2026-08-30 完成百炼真实多轮测试：同一 `sessionId` 连续对话，第二轮正确返回第一轮提供的订单编号；4 条 `CUSTOMER`/`AI` 消息均成功持久化。
 
@@ -176,31 +208,35 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-当前第一步：**开发 RAG 知识文档入库**。
+当前第一步：**根据客户问题检索相似知识切片，并让 AI 基于检索结果回答和返回引用来源**。
 
 已实现接口：
 
 ```http
-POST /api/conversations/{sessionId}/chat
+POST /api/knowledge/documents
 ```
 
 当前接口处理流程：
 
 ```text
-接收客户问题
-→ 短事务校验会话、保存 CUSTOMER 消息并读取最近 20 条上下文
-→ 结束数据库事务
-→ CustomerSupportAgent 将历史消息按 USER/ASSISTANT 角色传给百炼
-→ 短事务保存 AI 消息
-→ 返回客户消息和 AI 回复
+接收知识标题和原文
+→ 短事务保存 PROCESSING 状态的知识文档
+→ TokenTextSplitter 切分原文
+→ 调用百炼向量模型并写入 vector_store
+→ 短事务将状态更新为 READY 和记录切片数
+→ 返回知识文档创建结果
 ```
 
 本阶段已实现内容：
 
-- `AgentConversationMessage`：定义传给模型的 `USER`、`ASSISTANT` 消息角色。
-- `CustomerSupportAgent`：将完整对话上下文转换为 Spring AI 消息列表。
-- `ConversationService`：限制最近 20 条上下文，并使用 `TransactionTemplate` 缩短事务边界。
-- 自动化测试：验证上下文顺序、事务边界和模型失败后的消息保留。
+- `KnowledgeDocument`：保存知识原文、状态和切片数量。
+- `CreateKnowledgeRequest`、`KnowledgeDocumentResponse`：定义上传参数和返回结果。
+- `KnowledgeDocumentMapper`：使用 MyBatis-Plus 读写知识文档。
+- `KnowledgeDocumentService`：切分文本、写入向量并维护处理状态。
+- `KnowledgeDocumentController`：提供需要身份认证的知识上传接口。
+- Flyway V5：创建 `knowledge_document` 表。
+- 自动化测试：验证成功入库、参数校验、向量写入失败和匿名访问拒绝。
+- 管理员 HTTP Basic 认证：验证管理员身份后才允许上传知识。
 
 真实多轮验证结果：
 
@@ -209,7 +245,9 @@ POST /api/conversations/{sessionId}/chat
 - 百炼正确回复第一轮提供的订单编号，多轮上下文验证通过。
 - 自动化测试不调用百炼、不消耗 Token；本次真实验证消耗少量免费额度。
 
-下一项独立功能：**RAG 知识文档入库**。
+真实向量入库验证已完成：`knowledge_document` 与 `vector_store` 数据正确，短文生成 1 个切片，`chunk_count = 1`、`chunk_index = 0`。
+
+下一项独立功能：**根据客户问题检索相似知识切片，并让 AI 基于检索结果回答和返回引用来源**。
 
 后续路线：RAG 文档入库 → 向量检索与引用回答 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
@@ -218,14 +256,15 @@ POST /api/conversations/{sessionId}/chat
 当前 `master` 与 `origin/master` 均位于：
 
 ```text
-6c7731f 实现 AI 客服自动回复接口
+07af909 实现 AI 客服多轮对话上下文
 ```
 
-当前工作区包含尚未提交的多轮上下文、事务边界优化、自动化测试和进度文档更新，已经具备提交条件。
+当前工作区包含尚未提交的 RAG 知识文档入库、管理员 HTTP Basic 认证、Flyway V5、自动化测试和进度文档更新；自动化测试与真实百炼向量入库均已通过，已经具备提交条件。
 
 此前主要提交：
 
 ```text
+07af909 实现 AI 客服多轮对话上下文
 6c7731f 实现 AI 客服自动回复接口
 3c7b6b5 新增 ServicePilot 项目进度记录
 1170699 实现会话聊天记录查询接口

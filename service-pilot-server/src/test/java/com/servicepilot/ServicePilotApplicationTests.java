@@ -12,8 +12,13 @@ import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
 import com.servicepilot.conversation.service.ConversationService;
+import com.servicepilot.knowledge.domain.KnowledgeDocument;
+import com.servicepilot.knowledge.domain.KnowledgeDocumentStatus;
+import com.servicepilot.knowledge.mapper.KnowledgeDocumentMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -22,6 +27,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
@@ -31,6 +37,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -38,11 +46,15 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest
+@SpringBootTest(properties = {
+		"service-pilot.security.admin.username=test-admin",
+		"service-pilot.security.admin.password=test-password"
+})
 @AutoConfigureMockMvc
 class ServicePilotApplicationTests {
 
@@ -56,10 +68,16 @@ class ServicePilotApplicationTests {
 	private ConversationService conversationService;
 
 	@Autowired
+	private KnowledgeDocumentMapper knowledgeDocumentMapper;
+
+	@Autowired
 	private MockMvc mockMvc;
 
 	@MockitoBean
 	private CustomerSupportAgent customerSupportAgent;
+
+	@MockitoBean
+	private VectorStore vectorStore;
 
 	@Test
 	void contextLoads() {
@@ -406,6 +424,126 @@ class ServicePilotApplicationTests {
 				.andExpect(status().isNotFound());
 
 		verifyNoInteractions(customerSupportAgent);
+	}
+
+	@Test
+	@WithMockUser(roles = "ADMIN")
+	@SuppressWarnings("unchecked")
+	void createsKnowledgeDocumentAndWritesVectorChunks() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{
+							  "title":"Seven-day return policy",
+							  "content":"Eligible products may be returned within seven days. Returned products must remain complete with packaging and accessories. Customized products are not eligible for no-reason returns."
+							}
+							"""))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.id").isNumber())
+				.andExpect(jsonPath("$.title").value("Seven-day return policy"))
+				.andExpect(jsonPath("$.status").value("READY"))
+				.andExpect(jsonPath("$.chunkCount").isNumber())
+				.andExpect(jsonPath("$.createdAt").isNotEmpty());
+
+		ArgumentCaptor<List<Document>> chunksCaptor = ArgumentCaptor.forClass(List.class);
+		verify(vectorStore).add(chunksCaptor.capture());
+		List<Document> chunks = chunksCaptor.getValue();
+		assertThat(chunks).isNotEmpty();
+		assertThat(chunks)
+				.allSatisfy(chunk -> {
+					assertThat(chunk.getText()).isNotBlank();
+					assertThat(chunk.getMetadata())
+							.containsEntry("document_title", "Seven-day return policy")
+							.containsEntry("source_type", "knowledge_document");
+				});
+
+		KnowledgeDocument savedDocument = knowledgeDocumentMapper.selectOne(
+				Wrappers.<KnowledgeDocument>lambdaQuery()
+						.eq(KnowledgeDocument::getTitle, "Seven-day return policy")
+		);
+		assertThat(savedDocument.getStatus()).isEqualTo(KnowledgeDocumentStatus.READY);
+		assertThat(savedDocument.getChunkCount()).isEqualTo(chunks.size());
+	}
+
+	@Test
+	@WithMockUser(roles = "ADMIN")
+	void rejectsBlankKnowledgeContent() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"title":"Empty policy","content":""}
+							"""))
+				.andExpect(status().isBadRequest());
+
+		verify(vectorStore, never()).add(anyList());
+	}
+
+	@Test
+	@WithMockUser(roles = "ADMIN")
+	void marksKnowledgeDocumentFailedWhenVectorWriteFails() throws Exception {
+		doThrow(new RuntimeException("embedding unavailable"))
+				.when(vectorStore).add(anyList());
+
+		mockMvc.perform(post("/api/knowledge/documents")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{
+							  "title":"Failed vector policy",
+							  "content":"This content is long enough to be split and sent to the vector store, but the simulated embedding service will fail."
+							}
+							"""))
+				.andExpect(status().isBadGateway());
+
+		KnowledgeDocument failedDocument = knowledgeDocumentMapper.selectOne(
+				Wrappers.<KnowledgeDocument>lambdaQuery()
+						.eq(KnowledgeDocument::getTitle, "Failed vector policy")
+		);
+		assertThat(failedDocument.getStatus()).isEqualTo(KnowledgeDocumentStatus.FAILED);
+		assertThat(failedDocument.getChunkCount()).isZero();
+	}
+
+	@Test
+	void rejectsAnonymousKnowledgeCreation() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"title":"Protected policy","content":"Protected knowledge content."}
+							"""))
+				.andExpect(status().isUnauthorized());
+	}
+
+	@Test
+	void allowsConfiguredAdministratorToCreateKnowledge() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.with(httpBasic("test-admin", "test-password"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"title":"Administrator policy","content":"Only an authenticated administrator may add this knowledge."}
+							"""))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("READY"));
+	}
+
+	@Test
+	void rejectsIncorrectAdministratorPassword() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.with(httpBasic("test-admin", "wrong-password"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"title":"Rejected policy","content":"This request must not reach the controller."}
+							"""))
+				.andExpect(status().isUnauthorized());
+	}
+
+	@Test
+	@WithMockUser(roles = "USER")
+	void rejectsAuthenticatedUserWithoutAdminRole() throws Exception {
+		mockMvc.perform(post("/api/knowledge/documents")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"title":"Forbidden policy","content":"A normal user must not add knowledge."}
+							"""))
+				.andExpect(status().isForbidden());
 	}
 
 	@Test

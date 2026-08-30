@@ -45,3 +45,9 @@ management:
 logging:
   level:
     com.servicepilot: INFO
+
+service-pilot:
+  security:
+    admin:
+      username: ${ADMIN_USERNAME}
+      password: ${ADMIN_PASSWORD}
