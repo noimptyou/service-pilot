@@ -2,7 +2,7 @@
 
 > 最后更新：2026-08-31
 > 当前分支：`master`  
-> 当前阶段：订单查询 Tool Calling 已完成并通过自动化与真实百炼验证
+> 当前阶段：人工客服接管与 Agent 转人工决策已完成自动化与真实百炼验证
 
 ## 项目目标
 
@@ -53,7 +53,9 @@ com.servicepilot
 - 密码使用 BCrypt 编码后保存在进程内存中，不写入数据库、源码或 Git。
 - 请求采用无状态认证，不创建登录 Session。
 - `/api/knowledge/**` 仅允许 `ADMIN` 角色访问。
-- `/api/conversations/**` 和 `/actuator/health` 保持匿名访问。
+- 客户会话、客户消息、AI 对话和转人工申请接口允许匿名访问。
+- 人工接单和人工客服发消息接口仅允许 `ADMIN` 角色访问。
+- `/actuator/health` 保持匿名访问。
 
 ## 已完成内容
 
@@ -67,7 +69,7 @@ com.servicepilot
 - 使用 Spring Modulith 定义 `conversation`、`agent`、`knowledge`、`order` 模块。
 - 配置健康检查：`GET /actuator/health`。
 
-Flyway 已执行到 V6：
+Flyway 已执行到 V7：
 
 ```text
 V1  初始化平台配置
@@ -76,6 +78,7 @@ V3  创建客服会话表和聊天消息表
 V4  调整 Modulith JDBC 事件表结构
 V5  创建知识文档表
 V6  创建客户订单表
+V7  创建转人工申请表
 ```
 
 主要数据表：
@@ -88,6 +91,7 @@ V6  创建客户订单表
 - `vector_store`：后续 RAG 使用的向量表，由 Spring AI 初始化。
 - `knowledge_document`：保存知识文档原文、向量化状态和切片数量。
 - `customer_order`：保存订单编号、所属客户、商品、状态和物流单号。
+- `handoff_request`：保存转人工原因、处理状态、接单客服和处理时间。
 
 ### 客服会话接口
 
@@ -120,7 +124,7 @@ PATCH /api/conversations/{sessionId}/close
 - 将会话改为 `CLOSED` 并更新时间。
 - 重复关闭保持幂等，关闭后禁止发送消息。
 
-会话状态：`WAITING`、`ACTIVE`、`CLOSED`。  
+会话状态：`WAITING`、`ACTIVE`、`HUMAN_REQUESTED`、`HUMAN_ACTIVE`、`CLOSED`。
 消息发送者：`CUSTOMER`、`AGENT`、`AI`、`SYSTEM`。
 
 ### AI 自动回复接口
@@ -169,6 +173,19 @@ POST /api/knowledge/documents
 - 客户询问具体订单时，System Prompt 要求 AI 必须调用工具，不允许根据聊天记录猜测。
 - 当前客户身份仍来自匿名会话的客户名称，属于开发阶段保护；生产环境需要改为登录用户 ID。
 
+### 人工客服接管
+
+- 客户可通过 `POST /api/conversations/{sessionId}/handoff` 主动提交转人工申请。
+- AI 可调用 `request_human_handoff` 工具提交转人工申请，会话编号由服务器通过 `ToolContext` 注入，不暴露给模型填写。
+- `handoff_request` 记录申请原因、状态、接单客服和处理时间；同一会话最多存在一个活动申请。
+- 转人工申请后会话状态变为 `HUMAN_REQUESTED`，人工接单后变为 `HUMAN_ACTIVE`。
+- 转入人工处理后，`/chat` 返回 HTTP 409，防止 AI 和人工同时回复。
+- 管理员通过 `PATCH /api/conversations/{sessionId}/handoff/accept` 接单。
+- 接单更新使用“状态仍为等待中”的条件，避免两个客服同时接走同一个申请。
+- 管理员通过 `POST /api/conversations/{sessionId}/agent-messages` 发送 `AGENT` 消息。
+- 接单和人工发消息接口要求管理员认证，匿名请求返回 HTTP 401。
+- 关闭会话时，活动转人工申请自动改为 `RESOLVED`。
+
 ## AI 配置状态
 
 - 已创建阿里云百炼普通 API Key，真实值仅保存在本地 `.env`。
@@ -179,6 +196,7 @@ POST /api/knowledge/documents
 - 2026-08-24 已验证 AI Profile 启动成功：数据库连接、Flyway V4、pgvector 初始化和 8080 端口均正常。
 - 2026-08-25 已完成百炼真实请求验证：成功生成中文 AI 回复，并持久化 `CUSTOMER` 和 `AI` 两条消息。
 - 2026-08-30 已完成百炼真实多轮验证：同一会话第二轮能够正确回忆第一轮提供的订单编号。
+- 2026-08-31 已完成百炼真实转人工验证：模型成功调用转人工工具，人工客服接单后以 `AGENT` 身份回复。
 - 已确认本地 `vector_store.embedding` 为 1024 维，与 `text-embedding-v4` 默认维度一致。
 
 需要的本地变量名称：
@@ -197,7 +215,7 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 36 个测试，覆盖：
+当前测试类包含 40 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
@@ -212,15 +230,21 @@ SPRING_PROFILES_ACTIVE=ai
 - RAG 检索问题、Top 3、0.70 阈值、知识元数据映射和引用响应。
 - 检索失败时保留客户消息，且不调用大模型。
 - 将参考知识加入 Prompt，并防止执行知识内容中的角色命令或提示词。
-- Flyway V6、订单实体和 MyBatis-Plus 持久化。
+- Flyway V7、会话、订单和转人工实体的 MyBatis-Plus 持久化。
 - 当前客户订单查询、其他客户订单隐藏和订单号规范化。
 - ToolContext 客户身份传递、缺少身份时拒绝查询。
 - `query_order` Tool Schema 仅暴露订单号，并通过真实 `ToolCallback` 完成调用和结果序列化。
 - Spring Modulith 模块结构。
+- 重复转人工申请幂等处理、会话状态切换以及转人工后禁止 AI 回复。
+- 管理员接单和人工发消息权限，匿名调用管理员接口返回 401。
+- 关闭会话自动完成转人工申请。
+- `request_human_handoff` Tool Schema 隐藏会话编号，并通过真实 `ToolCallback` 创建转人工申请。
 
-2026-08-31 使用 Java 21.0.9 执行全量测试：36 个测试全部通过，0 失败、0 错误；Flyway V6 在 Testcontainers PostgreSQL/pgvector 中成功执行。
+2026-08-31 使用 Java 21.0.9 执行全量测试：40 个测试全部通过，0 失败、0 错误；Flyway V7 在 Testcontainers PostgreSQL/pgvector 中成功执行。
 
 2026-08-31 完成真实订单工具调用测试：客户“张三”在会话中查询 `SP-20260831-1001`，百炼调用 `query_order` 后正确返回数据库中的商品“无线耳机”、状态“已发货”和物流单号 `SF123456789`。
+
+2026-08-31 完成真实转人工工具调用测试：客户明确要求人工客服后，百炼成功创建转人工申请并回复确认；管理员接单后成功保存 `AGENT` 消息，数据库中形成 `CUSTOMER → AI → AGENT` 的完整接管记录。
 
 2026-08-30 完成真实知识入库测试：管理员认证成功，知识文档状态为 `READY`、切片数量为 1，百炼 `text-embedding-v4` 生成 1024 维向量并成功写入 `vector_store`；元数据中的文档 ID、标题、来源类型和切片序号均正确。
 
@@ -233,7 +257,7 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-当前第一步：**开发人工客服接管与 Agent 转人工决策**。
+当前已完成：**人工客服接管与 Agent 转人工决策**。
 
 已增强接口：
 
@@ -252,7 +276,7 @@ POST /api/conversations/{sessionId}/chat
 → 返回客户消息、AI 回复和 references 引用列表
 ```
 
-本阶段已实现内容：
+本阶段新增内容：
 
 - `KnowledgeDocument`：保存知识原文、状态和切片数量。
 - `CreateKnowledgeRequest`、`KnowledgeDocumentResponse`：定义上传参数和返回结果。
@@ -267,6 +291,13 @@ POST /api/conversations/{sessionId}/chat
 - `KnowledgeReference`、`KnowledgeReferenceResponse`：传递检索结果并返回引用来源。
 - `CustomerSupportAgent`：将参考知识加入安全约束后的 System Prompt。
 - `ConversationService`：在模型调用前检索知识，并在响应中返回引用列表。
+- `HandoffRequest`、`HandoffStatus`、`HandoffRequestMapper`：保存转人工工单。
+- `HandoffService`：处理申请、查询、接单和结束。
+- `HandoffTools`：允许 Agent 在需要时调用工具提交转人工申请。
+- `HumanHandoffRequested`：通过同步应用事件把 Agent 工具调用交给会话模块处理。
+- `ConversationController`：增加转人工申请、查询、管理员接单和人工消息接口。
+- `SecurityConfig`：保护管理员接单和人工消息接口。
+- Flyway V7：创建 `handoff_request` 表和活动申请唯一索引。
 
 真实多轮验证结果：
 
@@ -279,7 +310,7 @@ POST /api/conversations/{sessionId}/chat
 
 订单工具真实验证已完成：AI 返回内容与 `customer_order` 表一致，证明 `query_order` 已被模型成功调用；其他客户订单隐藏已由自动化测试覆盖。
 
-下一项独立功能：**人工客服接管与 Agent 转人工决策**。
+下一项独立功能：**开发客户聊天前端基础页面**，接入创建会话、AI 对话、聊天记录和转人工状态。
 
 后续路线：RAG 文档入库 → 向量检索与引用回答 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
@@ -288,14 +319,15 @@ POST /api/conversations/{sessionId}/chat
 当前 `master` 与 `origin/master` 均位于：
 
 ```text
-4f0caf8 实现 RAG 知识检索与引用回答
+6165913 实现订单查询 Tool Calling
 ```
 
-当前工作区仅包含尚未提交的订单查询 Tool Calling、Flyway V6、自动化测试和进度文档更新；36 个自动化测试与真实百炼工具调用均已通过，已经具备提交条件。
+当前工作区包含尚未提交的人工客服接管、Flyway V7、自动化测试和进度文档更新；40 个自动化测试与真实百炼转人工流程均已通过，已经具备提交条件。
 
 此前主要提交：
 
 ```text
+6165913 实现订单查询 Tool Calling
 4f0caf8 实现 RAG 知识检索与引用回答
 5206dea 实现 RAG 知识入库与管理员认证
 07af909 实现 AI 客服多轮对话上下文

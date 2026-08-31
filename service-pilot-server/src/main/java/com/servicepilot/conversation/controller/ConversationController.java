@@ -1,11 +1,15 @@
 package com.servicepilot.conversation.controller;
 
 import com.servicepilot.conversation.dto.ChatReplyResponse;
+import com.servicepilot.conversation.dto.AcceptHandoffRequest;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
+import com.servicepilot.conversation.dto.CreateHandoffRequest;
+import com.servicepilot.conversation.dto.HandoffResponse;
 import com.servicepilot.conversation.dto.MessageResponse;
 import com.servicepilot.conversation.dto.SendMessageRequest;
 import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.service.ConversationService;
+import com.servicepilot.conversation.service.HandoffService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -27,6 +31,8 @@ public class ConversationController {
 
     private final ConversationService conversationService;
 
+    private final HandoffService handoffService;
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public SessionResponse createSession(@Valid @RequestBody CreateSessionRequest request) {
@@ -46,6 +52,34 @@ public class ConversationController {
             @PathVariable Long sessionId,
             @Valid @RequestBody SendMessageRequest request) {
         return conversationService.chat(sessionId, request);
+    }
+
+    @PostMapping("/{sessionId}/handoff")
+    @ResponseStatus(HttpStatus.CREATED)
+    public HandoffResponse requestHandoff(
+            @PathVariable Long sessionId,
+            @Valid @RequestBody CreateHandoffRequest request) {
+        return handoffService.request(sessionId, request.getReason());
+    }
+
+    @GetMapping("/{sessionId}/handoff")
+    public HandoffResponse getLatestHandoff(@PathVariable Long sessionId) {
+        return handoffService.getLatest(sessionId);
+    }
+
+    @PatchMapping("/{sessionId}/handoff/accept")
+    public HandoffResponse acceptHandoff(
+            @PathVariable Long sessionId,
+            @Valid @RequestBody AcceptHandoffRequest request) {
+        return handoffService.accept(sessionId, request.getAgentName());
+    }
+
+    @PostMapping("/{sessionId}/agent-messages")
+    @ResponseStatus(HttpStatus.CREATED)
+    public MessageResponse sendAgentMessage(
+            @PathVariable Long sessionId,
+            @Valid @RequestBody SendMessageRequest request) {
+        return conversationService.sendAgentMessage(sessionId, request);
     }
 
     @GetMapping("/{sessionId}/messages")

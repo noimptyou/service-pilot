@@ -3,6 +3,7 @@ package com.servicepilot.config;
 import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -41,6 +42,8 @@ public class SecurityConfig {
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                        .requestMatchers(HttpMethod.PATCH, "/api/conversations/*/handoff/accept").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.POST, "/api/conversations/*/agent-messages").hasRole("ADMIN")
                         .requestMatchers("/api/conversations/**", "/actuator/health").permitAll()
                         .requestMatchers("/api/knowledge/**").hasRole("ADMIN")
                         .anyRequest().authenticated()

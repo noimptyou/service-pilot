@@ -1,6 +1,7 @@
 package com.servicepilot.agent;
 
 import com.servicepilot.knowledge.KnowledgeReference;
+import com.servicepilot.agent.tool.HandoffTools;
 import com.servicepilot.order.tool.OrderTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -23,22 +24,28 @@ public class CustomerSupportAgent {
             请使用中文，以礼貌、简洁、清晰的方式回答客户问题。
             不要编造订单状态、退款结果、平台规则或其他无法确认的信息。
             客户询问具体订单状态、商品或物流信息时，必须调用订单查询工具，不要根据聊天记录猜测。
-            如果无法确定答案，请明确说明暂时无法确认，并建议客户联系人工客服。
+            客户明确要求人工客服，或者问题无法可靠解决且确实需要人工处理时，必须调用转人工工具。
+            没有调用转人工工具时，不要声称已经提交或完成转人工。
+            如果只是资料不足但不需要人工处理，请明确说明暂时无法确认。
             """;
 
     private final ObjectProvider<ChatClient.Builder> chatClientBuilderProvider;
 
     private final OrderTools orderTools;
 
+    private final HandoffTools handoffTools;
+
     public CustomerSupportAgent(ObjectProvider<ChatClient.Builder> chatClientBuilderProvider,
-                                OrderTools orderTools) {
+                                OrderTools orderTools,
+                                HandoffTools handoffTools) {
         this.chatClientBuilderProvider = chatClientBuilderProvider;
         this.orderTools = orderTools;
+        this.handoffTools = handoffTools;
     }
 
     public String reply(List<AgentConversationMessage> conversation,
                         List<KnowledgeReference> knowledgeReferences,
-                        String customerName) {
+                        AgentRequestContext requestContext) {
         ChatClient.Builder builder = chatClientBuilderProvider.getIfAvailable();
         if (builder == null) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "AI客服未启用");
@@ -54,8 +61,11 @@ public class CustomerSupportAgent {
                     .build()
                     .prompt()
                     .messages(messages)
-                    .tools(orderTools)
-                    .toolContext(Map.of(OrderTools.CUSTOMER_NAME_CONTEXT_KEY, customerName))
+                    .tools(orderTools, handoffTools)
+                    .toolContext(Map.of(
+                            OrderTools.CUSTOMER_NAME_CONTEXT_KEY, requestContext.customerName(),
+                            HandoffTools.SESSION_ID_CONTEXT_KEY, requestContext.sessionId()
+                    ))
                     .call()
                     .content();
 

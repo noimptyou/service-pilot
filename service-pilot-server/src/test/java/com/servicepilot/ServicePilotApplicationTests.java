@@ -2,15 +2,20 @@ package com.servicepilot;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.servicepilot.agent.AgentConversationMessage;
+import com.servicepilot.agent.AgentRequestContext;
 import com.servicepilot.agent.CustomerSupportAgent;
+import com.servicepilot.agent.tool.HandoffTools;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
+import com.servicepilot.conversation.domain.HandoffRequest;
+import com.servicepilot.conversation.domain.HandoffStatus;
 import com.servicepilot.conversation.domain.SenderType;
 import com.servicepilot.conversation.domain.SessionStatus;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
 import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
+import com.servicepilot.conversation.mapper.HandoffRequestMapper;
 import com.servicepilot.conversation.service.ConversationService;
 import com.servicepilot.knowledge.KnowledgeReference;
 import com.servicepilot.knowledge.domain.KnowledgeDocument;
@@ -51,7 +56,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -81,6 +85,12 @@ class ServicePilotApplicationTests {
 
 	@Autowired
 	private ConversationService conversationService;
+
+	@Autowired
+	private HandoffRequestMapper handoffRequestMapper;
+
+	@Autowired
+	private HandoffTools handoffTools;
 
 	@Autowired
 	private KnowledgeDocumentMapper knowledgeDocumentMapper;
@@ -319,9 +329,11 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList(), anyString())).thenAnswer(invocation -> {
+		when(customerSupportAgent.reply(anyList(), anyList(), any(AgentRequestContext.class))).thenAnswer(invocation -> {
 			assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-			assertThat(invocation.getArgument(2, String.class)).isEqualTo("AI Chat Tester");
+			AgentRequestContext requestContext = invocation.getArgument(2, AgentRequestContext.class);
+			assertThat(requestContext.sessionId()).isEqualTo(session.getId());
+			assertThat(requestContext.customerName()).isEqualTo("AI Chat Tester");
 			return "Yes, eligible products can be returned.";
 		});
 
@@ -352,7 +364,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("Multi-turn Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
+		when(customerSupportAgent.reply(anyList(), anyList(), any(AgentRequestContext.class)))
 				.thenReturn("Your order number is A100.", "I remember that your order number is A100.");
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -371,7 +383,7 @@ class ServicePilotApplicationTests {
 		ArgumentCaptor<List<AgentConversationMessage>> contextCaptor =
 				ArgumentCaptor.forClass(List.class);
 		verify(customerSupportAgent, times(2))
-				.reply(contextCaptor.capture(), anyList(), anyString());
+				.reply(contextCaptor.capture(), anyList(), any(AgentRequestContext.class));
 
 		List<AgentConversationMessage> secondContext = contextCaptor.getAllValues().get(1);
 		assertThat(secondContext)
@@ -388,7 +400,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Failure Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
+		when(customerSupportAgent.reply(anyList(), anyList(), any(AgentRequestContext.class)))
 				.thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "AI客服暂时无法回复"));
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -425,7 +437,7 @@ class ServicePilotApplicationTests {
 				.build();
 		when(vectorStore.similaritySearch(any(SearchRequest.class)))
 				.thenReturn(List.of(referenceDocument));
-		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
+		when(customerSupportAgent.reply(anyList(), anyList(), any(AgentRequestContext.class)))
 				.thenReturn("Eligible products support seven-day no-reason returns.");
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -453,7 +465,7 @@ class ServicePilotApplicationTests {
 		ArgumentCaptor<List<KnowledgeReference>> referencesCaptor =
 				ArgumentCaptor.forClass(List.class);
 		verify(customerSupportAgent)
-				.reply(anyList(), referencesCaptor.capture(), anyString());
+				.reply(anyList(), referencesCaptor.capture(), any(AgentRequestContext.class));
 		assertThat(referencesCaptor.getValue())
 				.extracting(
 						KnowledgeReference::knowledgeDocumentId,
@@ -754,6 +766,148 @@ class ServicePilotApplicationTests {
 							{"title":"Forbidden policy","content":"A normal user must not add knowledge."}
 							"""))
 				.andExpect(status().isForbidden());
+	}
+
+	@Test
+	void requestsHumanHandoffOnlyOnceAndStopsAiReplies() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Handoff Customer");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		for (int attempt = 0; attempt < 2; attempt++) {
+			mockMvc.perform(post("/api/conversations/{sessionId}/handoff", session.getId())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{"reason":"  I need a human agent.  "}
+								"""))
+					.andExpect(status().isCreated())
+					.andExpect(jsonPath("$.sessionId").value(session.getId()))
+					.andExpect(jsonPath("$.status").value("PENDING"))
+					.andExpect(jsonPath("$.reason").value("I need a human agent."));
+		}
+
+		assertThat(handoffRequestMapper.selectCount(
+				Wrappers.<HandoffRequest>lambdaQuery()
+						.eq(HandoffRequest::getSessionId, session.getId())
+		)).isEqualTo(1);
+		assertThat(customerSessionMapper.selectById(session.getId()).getStatus())
+				.isEqualTo(SessionStatus.HUMAN_REQUESTED);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Can AI still answer?"}
+							"""))
+				.andExpect(status().isConflict());
+		verifyNoInteractions(customerSupportAgent);
+	}
+
+	@Test
+	void protectsAgentActionsAndAllowsAdministratorToHandleConversation() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Protected Handoff Customer");
+		SessionResponse session = conversationService.createSession(createRequest);
+		mockMvc.perform(post("/api/conversations/{sessionId}/handoff", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"reason":"My issue needs manual review."}
+							"""))
+				.andExpect(status().isCreated());
+
+		mockMvc.perform(patch("/api/conversations/{sessionId}/handoff/accept", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"agentName":"Agent Alice"}
+							"""))
+				.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(patch("/api/conversations/{sessionId}/handoff/accept", session.getId())
+					.with(httpBasic("test-admin", "test-password"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"agentName":"  Agent Alice  "}
+							"""))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("ACCEPTED"))
+				.andExpect(jsonPath("$.assignedAgent").value("Agent Alice"));
+		assertThat(customerSessionMapper.selectById(session.getId()).getStatus())
+				.isEqualTo(SessionStatus.HUMAN_ACTIVE);
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/agent-messages", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Hello from a fake agent."}
+							"""))
+				.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/agent-messages", session.getId())
+					.with(httpBasic("test-admin", "test-password"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Hello, I am handling your request."}
+							"""))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.senderType").value("AGENT"))
+				.andExpect(jsonPath("$.content").value("Hello, I am handling your request."));
+	}
+
+	@Test
+	void resolvesActiveHandoffWhenConversationCloses() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Closing Handoff Customer");
+		SessionResponse session = conversationService.createSession(createRequest);
+		mockMvc.perform(post("/api/conversations/{sessionId}/handoff", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"reason":"Please transfer me."}
+							"""))
+				.andExpect(status().isCreated());
+
+		mockMvc.perform(patch("/api/conversations/{sessionId}/close", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("CLOSED"));
+
+		HandoffRequest handoff = handoffRequestMapper.selectOne(
+				Wrappers.<HandoffRequest>lambdaQuery()
+						.eq(HandoffRequest::getSessionId, session.getId())
+		);
+		assertThat(handoff.getStatus()).isEqualTo(HandoffStatus.RESOLVED);
+		assertThat(handoff.getResolvedAt()).isNotNull();
+
+		mockMvc.perform(get("/api/conversations/{sessionId}/handoff", session.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("RESOLVED"))
+				.andExpect(jsonPath("$.resolvedAt").isNotEmpty());
+	}
+
+	@Test
+	void handoffToolKeepsSessionIdOutsideModelVisibleSchemaAndCreatesRequest() {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("Tool Handoff Customer");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		ToolCallback[] callbacks = ToolCallbacks.from(handoffTools);
+		assertThat(callbacks).hasSize(1);
+		ToolCallback callback = callbacks[0];
+		assertThat(callback.getToolDefinition().name()).isEqualTo("request_human_handoff");
+		assertThat(callback.getToolDefinition().inputSchema())
+				.contains("reason")
+				.doesNotContain(HandoffTools.SESSION_ID_CONTEXT_KEY)
+				.doesNotContain("ToolContext");
+
+		String toolResult = callback.call(
+				"{\"reason\":\"The customer explicitly requested a human agent.\"}",
+				new ToolContext(Map.of(HandoffTools.SESSION_ID_CONTEXT_KEY, session.getId()))
+		);
+
+		assertThat(toolResult).contains("已提交转人工申请");
+		HandoffRequest handoff = handoffRequestMapper.selectOne(
+				Wrappers.<HandoffRequest>lambdaQuery()
+						.eq(HandoffRequest::getSessionId, session.getId())
+		);
+		assertThat(handoff.getStatus()).isEqualTo(HandoffStatus.PENDING);
+		assertThat(handoff.getReason())
+				.isEqualTo("The customer explicitly requested a human agent.");
 	}
 
 	@Test

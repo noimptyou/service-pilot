@@ -2,6 +2,7 @@ package com.servicepilot.conversation.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.servicepilot.agent.AgentConversationMessage;
+import com.servicepilot.agent.AgentRequestContext;
 import com.servicepilot.agent.CustomerSupportAgent;
 import com.servicepilot.conversation.domain.ChatMessage;
 import com.servicepilot.conversation.domain.CustomerSession;
@@ -45,6 +46,8 @@ public class ConversationService {
 
     private final TransactionTemplate transactionTemplate;
 
+    private final HandoffService handoffService;
+
     @Transactional
     public SessionResponse createSession(CreateSessionRequest request) {
         OffsetDateTime now = OffsetDateTime.now();
@@ -66,9 +69,18 @@ public class ConversationService {
         return toMessageResponse(saveMessage(sessionId, SenderType.CUSTOMER, request.getContent()));
     }
 
+    @Transactional
+    public MessageResponse sendAgentMessage(Long sessionId, SendMessageRequest request) {
+        CustomerSession session = requireOpenSession(sessionId);
+        if (session.getStatus() != SessionStatus.HUMAN_ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "人工客服尚未接入该会话");
+        }
+        return toMessageResponse(saveMessage(sessionId, SenderType.AGENT, request.getContent()));
+    }
+
     public ChatReplyResponse chat(Long sessionId, SendMessageRequest request) {
         ChatContext chatContext = transactionTemplate.execute(status -> {
-            CustomerSession session = requireOpenSession(sessionId);
+            CustomerSession session = requireAiAvailableSession(sessionId);
             ChatMessage customerMessage = saveMessage(
                     sessionId,
                     SenderType.CUSTOMER,
@@ -77,6 +89,7 @@ public class ConversationService {
             return new ChatContext(
                     customerMessage,
                     loadAgentContext(sessionId),
+                    session.getId(),
                     session.getCustomerName()
             );
         });
@@ -90,7 +103,7 @@ public class ConversationService {
         String answer = customerSupportAgent.reply(
                 chatContext.conversation(),
                 knowledgeReferences,
-                chatContext.customerName()
+                new AgentRequestContext(chatContext.sessionId(), chatContext.customerName())
         );
         ChatMessage aiMessage = transactionTemplate.execute(
                 status -> saveMessage(sessionId, SenderType.AI, answer)
@@ -130,6 +143,7 @@ public class ConversationService {
             session.setUpdatedAt(OffsetDateTime.now());
             customerSessionMapper.updateById(session);
         }
+        handoffService.resolveActive(sessionId);
         return toSessionResponse(session);
     }
 
@@ -145,6 +159,15 @@ public class ConversationService {
         CustomerSession session = requireSession(sessionId);
         if (session.getStatus() == SessionStatus.CLOSED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "会话已结束，不能继续发送消息");
+        }
+        return session;
+    }
+
+    private CustomerSession requireAiAvailableSession(Long sessionId) {
+        CustomerSession session = requireOpenSession(sessionId);
+        if (session.getStatus() == SessionStatus.HUMAN_REQUESTED
+                || session.getStatus() == SessionStatus.HUMAN_ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "会话已转入人工处理，AI客服不再回复");
         }
         return session;
     }
@@ -214,6 +237,7 @@ public class ConversationService {
     private record ChatContext(
             ChatMessage customerMessage,
             List<AgentConversationMessage> conversation,
+            Long sessionId,
             String customerName
     ) {
     }
