@@ -1,8 +1,8 @@
 # ServicePilot 项目进度
 
-> 最后更新：2026-08-30
+> 最后更新：2026-08-31
 > 当前分支：`master`  
-> 当前阶段：RAG 向量检索与引用回答代码、自动化测试已完成，待真实百炼 RAG 验证
+> 当前阶段：订单查询 Tool Calling 已完成并通过自动化与真实百炼验证
 
 ## 项目目标
 
@@ -42,7 +42,7 @@ com.servicepilot
 │  └─ dto                  请求与响应对象
 ├─ agent                   Agent 编排模块（已完成基础对话与多轮上下文）
 ├─ knowledge               RAG 知识库模块（已完成文档入库基础功能）
-├─ order                   订单工具模块（待开发）
+├─ order                   订单工具模块（已完成订单查询基础功能）
 └─ config                  全局配置
 ```
 
@@ -67,7 +67,7 @@ com.servicepilot
 - 使用 Spring Modulith 定义 `conversation`、`agent`、`knowledge`、`order` 模块。
 - 配置健康检查：`GET /actuator/health`。
 
-Flyway 已执行到 V5：
+Flyway 已执行到 V6：
 
 ```text
 V1  初始化平台配置
@@ -75,6 +75,7 @@ V2  创建 Spring Modulith 事件记录表
 V3  创建客服会话表和聊天消息表
 V4  调整 Modulith JDBC 事件表结构
 V5  创建知识文档表
+V6  创建客户订单表
 ```
 
 主要数据表：
@@ -86,6 +87,7 @@ V5  创建知识文档表
 - `flyway_schema_history`：Flyway 迁移历史。
 - `vector_store`：后续 RAG 使用的向量表，由 Spring AI 初始化。
 - `knowledge_document`：保存知识文档原文、向量化状态和切片数量。
+- `customer_order`：保存订单编号、所属客户、商品、状态和物流单号。
 
 ### 客服会话接口
 
@@ -157,6 +159,16 @@ POST /api/knowledge/documents
 - 知识上传属于后台管理功能，接口要求身份认证，不匿名开放。
 - 已接入开发阶段管理员 HTTP Basic 认证，可使用管理员账号进行真实入库测试。
 
+### 订单查询工具
+
+- 新增 `CustomerOrder`、`OrderStatus` 和 `CustomerOrderMapper` 管理订单数据。
+- `OrderService` 使用订单号与当前客户名称双条件查询，避免仅凭订单号返回其他客户数据。
+- `OrderTools.query_order` 使用 Spring AI `@Tool` 向模型提供订单查询能力。
+- 当前客户名称由服务器通过 `ToolContext` 注入，模型可见参数中只有 `orderNumber`。
+- 工具返回商品名称、中文订单状态、物流单号和查询结果说明。
+- 客户询问具体订单时，System Prompt 要求 AI 必须调用工具，不允许根据聊天记录猜测。
+- 当前客户身份仍来自匿名会话的客户名称，属于开发阶段保护；生产环境需要改为登录用户 ID。
+
 ## AI 配置状态
 
 - 已创建阿里云百炼普通 API Key，真实值仅保存在本地 `.env`。
@@ -185,7 +197,7 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 32 个测试，覆盖：
+当前测试类包含 36 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
@@ -200,9 +212,15 @@ SPRING_PROFILES_ACTIVE=ai
 - RAG 检索问题、Top 3、0.70 阈值、知识元数据映射和引用响应。
 - 检索失败时保留客户消息，且不调用大模型。
 - 将参考知识加入 Prompt，并防止执行知识内容中的角色命令或提示词。
+- Flyway V6、订单实体和 MyBatis-Plus 持久化。
+- 当前客户订单查询、其他客户订单隐藏和订单号规范化。
+- ToolContext 客户身份传递、缺少身份时拒绝查询。
+- `query_order` Tool Schema 仅暴露订单号，并通过真实 `ToolCallback` 完成调用和结果序列化。
 - Spring Modulith 模块结构。
 
-2026-08-30 使用 Java 21.0.9 执行全量测试：32 个测试全部通过，0 失败、0 错误；Flyway V5 在 Testcontainers PostgreSQL/pgvector 中成功执行。
+2026-08-31 使用 Java 21.0.9 执行全量测试：36 个测试全部通过，0 失败、0 错误；Flyway V6 在 Testcontainers PostgreSQL/pgvector 中成功执行。
+
+2026-08-31 完成真实订单工具调用测试：客户“张三”在会话中查询 `SP-20260831-1001`，百炼调用 `query_order` 后正确返回数据库中的商品“无线耳机”、状态“已发货”和物流单号 `SF123456789`。
 
 2026-08-30 完成真实知识入库测试：管理员认证成功，知识文档状态为 `READY`、切片数量为 1，百炼 `text-embedding-v4` 生成 1024 维向量并成功写入 `vector_store`；元数据中的文档 ID、标题、来源类型和切片序号均正确。
 
@@ -215,7 +233,7 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-当前第一步：**使用已入库的退款知识进行一次真实 RAG 问答，确认回答内容和 `references`**。
+当前第一步：**开发人工客服接管与 Agent 转人工决策**。
 
 已增强接口：
 
@@ -259,9 +277,9 @@ POST /api/conversations/{sessionId}/chat
 
 真实向量入库验证已完成：`knowledge_document` 与 `vector_store` 数据正确，短文生成 1 个切片，`chunk_count = 1`、`chunk_index = 0`。
 
-下一项验证：**重启后端后询问“定制商品支持七天无理由退款吗”，确认 AI 根据已入库知识回答，且 `references` 返回“七天无理由退款规则”**。
+订单工具真实验证已完成：AI 返回内容与 `customer_order` 表一致，证明 `query_order` 已被模型成功调用；其他客户订单隐藏已由自动化测试覆盖。
 
-验证通过后的下一项独立功能：**订单查询工具调用**。
+下一项独立功能：**人工客服接管与 Agent 转人工决策**。
 
 后续路线：RAG 文档入库 → 向量检索与引用回答 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
@@ -270,14 +288,15 @@ POST /api/conversations/{sessionId}/chat
 当前 `master` 与 `origin/master` 均位于：
 
 ```text
-5206dea 实现 RAG 知识入库与管理员认证
+4f0caf8 实现 RAG 知识检索与引用回答
 ```
 
-当前工作区仅包含尚未提交的 RAG 向量检索、引用回答、自动化测试和进度文档更新；32 个自动化测试已通过，真实 RAG 回答尚待验证。
+当前工作区仅包含尚未提交的订单查询 Tool Calling、Flyway V6、自动化测试和进度文档更新；36 个自动化测试与真实百炼工具调用均已通过，已经具备提交条件。
 
 此前主要提交：
 
 ```text
+4f0caf8 实现 RAG 知识检索与引用回答
 5206dea 实现 RAG 知识入库与管理员认证
 07af909 实现 AI 客服多轮对话上下文
 6c7731f 实现 AI 客服自动回复接口

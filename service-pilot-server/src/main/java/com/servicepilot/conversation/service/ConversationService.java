@@ -68,13 +68,17 @@ public class ConversationService {
 
     public ChatReplyResponse chat(Long sessionId, SendMessageRequest request) {
         ChatContext chatContext = transactionTemplate.execute(status -> {
-            requireOpenSession(sessionId);
+            CustomerSession session = requireOpenSession(sessionId);
             ChatMessage customerMessage = saveMessage(
                     sessionId,
                     SenderType.CUSTOMER,
                     request.getContent()
             );
-            return new ChatContext(customerMessage, loadAgentContext(sessionId));
+            return new ChatContext(
+                    customerMessage,
+                    loadAgentContext(sessionId),
+                    session.getCustomerName()
+            );
         });
         if (chatContext == null) {
             throw new IllegalStateException("保存客户消息失败");
@@ -85,7 +89,8 @@ public class ConversationService {
         );
         String answer = customerSupportAgent.reply(
                 chatContext.conversation(),
-                knowledgeReferences
+                knowledgeReferences,
+                chatContext.customerName()
         );
         ChatMessage aiMessage = transactionTemplate.execute(
                 status -> saveMessage(sessionId, SenderType.AI, answer)
@@ -208,7 +213,8 @@ public class ConversationService {
 
     private record ChatContext(
             ChatMessage customerMessage,
-            List<AgentConversationMessage> conversation
+            List<AgentConversationMessage> conversation,
+            String customerName
     ) {
     }
 }

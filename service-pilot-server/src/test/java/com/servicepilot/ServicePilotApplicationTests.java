@@ -16,11 +16,20 @@ import com.servicepilot.knowledge.KnowledgeReference;
 import com.servicepilot.knowledge.domain.KnowledgeDocument;
 import com.servicepilot.knowledge.domain.KnowledgeDocumentStatus;
 import com.servicepilot.knowledge.mapper.KnowledgeDocumentMapper;
+import com.servicepilot.order.OrderLookupResult;
+import com.servicepilot.order.domain.CustomerOrder;
+import com.servicepilot.order.domain.OrderStatus;
+import com.servicepilot.order.mapper.CustomerOrderMapper;
+import com.servicepilot.order.service.OrderService;
+import com.servicepilot.order.tool.OrderTools;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.document.Document;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -35,11 +44,14 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -72,6 +84,15 @@ class ServicePilotApplicationTests {
 
 	@Autowired
 	private KnowledgeDocumentMapper knowledgeDocumentMapper;
+
+	@Autowired
+	private CustomerOrderMapper customerOrderMapper;
+
+	@Autowired
+	private OrderService orderService;
+
+	@Autowired
+	private OrderTools orderTools;
 
 	@Autowired
 	private MockMvc mockMvc;
@@ -298,8 +319,9 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList())).thenAnswer(invocation -> {
+		when(customerSupportAgent.reply(anyList(), anyList(), anyString())).thenAnswer(invocation -> {
 			assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+			assertThat(invocation.getArgument(2, String.class)).isEqualTo("AI Chat Tester");
 			return "Yes, eligible products can be returned.";
 		});
 
@@ -330,7 +352,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("Multi-turn Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList()))
+		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
 				.thenReturn("Your order number is A100.", "I remember that your order number is A100.");
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -348,7 +370,8 @@ class ServicePilotApplicationTests {
 
 		ArgumentCaptor<List<AgentConversationMessage>> contextCaptor =
 				ArgumentCaptor.forClass(List.class);
-		verify(customerSupportAgent, times(2)).reply(contextCaptor.capture(), anyList());
+		verify(customerSupportAgent, times(2))
+				.reply(contextCaptor.capture(), anyList(), anyString());
 
 		List<AgentConversationMessage> secondContext = contextCaptor.getAllValues().get(1);
 		assertThat(secondContext)
@@ -365,7 +388,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Failure Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList(), anyList()))
+		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
 				.thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "AI客服暂时无法回复"));
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -402,7 +425,7 @@ class ServicePilotApplicationTests {
 				.build();
 		when(vectorStore.similaritySearch(any(SearchRequest.class)))
 				.thenReturn(List.of(referenceDocument));
-		when(customerSupportAgent.reply(anyList(), anyList()))
+		when(customerSupportAgent.reply(anyList(), anyList(), anyString()))
 				.thenReturn("Eligible products support seven-day no-reason returns.");
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -429,7 +452,8 @@ class ServicePilotApplicationTests {
 
 		ArgumentCaptor<List<KnowledgeReference>> referencesCaptor =
 				ArgumentCaptor.forClass(List.class);
-		verify(customerSupportAgent).reply(anyList(), referencesCaptor.capture());
+		verify(customerSupportAgent)
+				.reply(anyList(), referencesCaptor.capture(), anyString());
 		assertThat(referencesCaptor.getValue())
 				.extracting(
 						KnowledgeReference::knowledgeDocumentId,
@@ -471,6 +495,100 @@ class ServicePilotApplicationTests {
 						SenderType.CUSTOMER,
 						"Please answer using the knowledge base."
 				));
+	}
+
+	@Test
+	void orderServiceReturnsOnlyOrderOwnedByCurrentCustomer() {
+		CustomerOrder order = saveOrder(
+				"SP-ORDER-OWNER-1001",
+				"Order Owner",
+				"Wireless headphones",
+				OrderStatus.SHIPPED,
+				"SF10000001"
+		);
+
+		OrderLookupResult ownedResult = orderService.findForCustomer(
+				"Order Owner",
+				"sp-order-owner-1001"
+		);
+		OrderLookupResult otherCustomerResult = orderService.findForCustomer(
+				"Another Customer",
+				order.getOrderNumber()
+		);
+
+		assertThat(ownedResult.found()).isTrue();
+		assertThat(ownedResult.orderNumber()).isEqualTo("SP-ORDER-OWNER-1001");
+		assertThat(ownedResult.productName()).isEqualTo("Wireless headphones");
+		assertThat(ownedResult.status()).isEqualTo("已发货");
+		assertThat(ownedResult.trackingNumber()).isEqualTo("SF10000001");
+		assertThat(otherCustomerResult.found()).isFalse();
+		assertThat(otherCustomerResult.productName()).isNull();
+		assertThat(otherCustomerResult.trackingNumber()).isNull();
+	}
+
+	@Test
+	void orderToolUsesServerProvidedCustomerContext() {
+		saveOrder(
+				"SP-ORDER-TOOL-1002",
+				"Tool Customer",
+				"Mechanical keyboard",
+				OrderStatus.DELIVERED,
+				"YT10000002"
+		);
+
+		OrderLookupResult result = orderTools.queryOrder(
+				"SP-ORDER-TOOL-1002",
+				new ToolContext(Map.of(
+						OrderTools.CUSTOMER_NAME_CONTEXT_KEY,
+						"Tool Customer"
+				))
+		);
+
+		assertThat(result.found()).isTrue();
+		assertThat(result.status()).isEqualTo("已送达");
+		assertThat(result.productName()).isEqualTo("Mechanical keyboard");
+	}
+
+	@Test
+	void registersOrderToolWithSafeModelVisibleSchema() {
+		saveOrder(
+				"SP-ORDER-CALLBACK-1003",
+				"Callback Customer",
+				"Smart watch",
+				OrderStatus.PROCESSING,
+				null
+		);
+
+		ToolCallback[] callbacks = ToolCallbacks.from(orderTools);
+		assertThat(callbacks).hasSize(1);
+		ToolCallback callback = callbacks[0];
+		assertThat(callback.getToolDefinition().name()).isEqualTo("query_order");
+		assertThat(callback.getToolDefinition().inputSchema())
+				.contains("orderNumber")
+				.doesNotContain(OrderTools.CUSTOMER_NAME_CONTEXT_KEY)
+				.doesNotContain("ToolContext");
+
+		String toolResult = callback.call(
+				"{\"orderNumber\":\"SP-ORDER-CALLBACK-1003\"}",
+				new ToolContext(Map.of(
+						OrderTools.CUSTOMER_NAME_CONTEXT_KEY,
+						"Callback Customer"
+				))
+		);
+		assertThat(toolResult)
+				.contains("SP-ORDER-CALLBACK-1003")
+				.contains("Smart watch")
+				.contains("处理中");
+	}
+
+	@Test
+	void orderToolRejectsMissingCustomerContext() {
+		assertThatThrownBy(() -> orderTools.queryOrder(
+				"SP-ORDER-MISSING-CONTEXT",
+				new ToolContext(Map.of())
+		))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessage("缺少当前客户身份，不能查询订单");
 	}
 
 	@Test
@@ -641,6 +759,24 @@ class ServicePilotApplicationTests {
 	@Test
 	void modularStructureIsValid() {
 		ApplicationModules.of(ServicePilotApplication.class).verify();
+	}
+
+	private CustomerOrder saveOrder(
+			String orderNumber,
+			String customerName,
+			String productName,
+			OrderStatus status,
+			String trackingNumber
+	) {
+		CustomerOrder order = new CustomerOrder();
+		order.setOrderNumber(orderNumber);
+		order.setCustomerName(customerName);
+		order.setProductName(productName);
+		order.setStatus(status);
+		order.setTrackingNumber(trackingNumber);
+		assertThat(customerOrderMapper.insert(order)).isEqualTo(1);
+		assertThat(order.getId()).isNotNull();
+		return order;
 	}
 
 }

@@ -11,7 +11,7 @@ class CustomerSupportAgentTests {
 
     @Test
     void addsRetrievedKnowledgeAndSafetyInstructionsToSystemPrompt() {
-        CustomerSupportAgent agent = new CustomerSupportAgent(null);
+        CustomerSupportAgent agent = new CustomerSupportAgent(null, null);
         KnowledgeReference reference = new KnowledgeReference(
                 1L,
                 "七天无理由退款规则",
