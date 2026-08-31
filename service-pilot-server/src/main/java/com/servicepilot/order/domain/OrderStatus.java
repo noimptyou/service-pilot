@@ -1,5 +1,8 @@
 package com.servicepilot.order.domain;
 
+import lombok.Getter;
+
+@Getter
 public enum OrderStatus {
 
     PENDING_PAYMENT("待付款"),
@@ -16,7 +19,4 @@ public enum OrderStatus {
         this.description = description;
     }
 
-    public String getDescription() {
-        return description;
-    }
 }
