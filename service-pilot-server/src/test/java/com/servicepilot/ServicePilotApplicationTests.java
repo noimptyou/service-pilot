@@ -12,6 +12,7 @@ import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
 import com.servicepilot.conversation.service.ConversationService;
+import com.servicepilot.knowledge.KnowledgeReference;
 import com.servicepilot.knowledge.domain.KnowledgeDocument;
 import com.servicepilot.knowledge.domain.KnowledgeDocumentStatus;
 import com.servicepilot.knowledge.mapper.KnowledgeDocumentMapper;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -37,6 +39,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -295,7 +298,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList())).thenAnswer(invocation -> {
+		when(customerSupportAgent.reply(anyList(), anyList())).thenAnswer(invocation -> {
 			assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
 			return "Yes, eligible products can be returned.";
 		});
@@ -327,7 +330,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("Multi-turn Chat Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList()))
+		when(customerSupportAgent.reply(anyList(), anyList()))
 				.thenReturn("Your order number is A100.", "I remember that your order number is A100.");
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -345,7 +348,7 @@ class ServicePilotApplicationTests {
 
 		ArgumentCaptor<List<AgentConversationMessage>> contextCaptor =
 				ArgumentCaptor.forClass(List.class);
-		verify(customerSupportAgent, times(2)).reply(contextCaptor.capture());
+		verify(customerSupportAgent, times(2)).reply(contextCaptor.capture(), anyList());
 
 		List<AgentConversationMessage> secondContext = contextCaptor.getAllValues().get(1);
 		assertThat(secondContext)
@@ -362,7 +365,7 @@ class ServicePilotApplicationTests {
 		CreateSessionRequest createRequest = new CreateSessionRequest();
 		createRequest.setCustomerName("AI Failure Tester");
 		SessionResponse session = conversationService.createSession(createRequest);
-		when(customerSupportAgent.reply(anyList()))
+		when(customerSupportAgent.reply(anyList(), anyList()))
 				.thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "AI客服暂时无法回复"));
 
 		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
@@ -379,6 +382,95 @@ class ServicePilotApplicationTests {
 		);
 		assertThat(messages).extracting(ChatMessage::getSenderType, ChatMessage::getContent)
 				.containsExactly(tuple(SenderType.CUSTOMER, "Please keep this message."));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void retrievesKnowledgeAndReturnsReferencesWithAiReply() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("RAG Chat Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		Document referenceDocument = Document.builder()
+				.id("00000000-0000-0000-0000-000000000001")
+				.text("Eligible products support seven-day no-reason returns.")
+				.metadata("knowledge_document_id", "1")
+				.metadata("document_title", "Seven-day return policy")
+				.metadata("chunk_index", 0)
+				.metadata("source_type", "knowledge_document")
+				.score(0.91)
+				.build();
+		when(vectorStore.similaritySearch(any(SearchRequest.class)))
+				.thenReturn(List.of(referenceDocument));
+		when(customerSupportAgent.reply(anyList(), anyList()))
+				.thenReturn("Eligible products support seven-day no-reason returns.");
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Can I return a product within seven days?"}
+							"""))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.aiMessage.content")
+						.value("Eligible products support seven-day no-reason returns."))
+				.andExpect(jsonPath("$.references.length()").value(1))
+				.andExpect(jsonPath("$.references[0].knowledgeDocumentId").value(1))
+				.andExpect(jsonPath("$.references[0].documentTitle")
+						.value("Seven-day return policy"))
+				.andExpect(jsonPath("$.references[0].chunkIndex").value(0))
+				.andExpect(jsonPath("$.references[0].score").value(0.91));
+
+		ArgumentCaptor<SearchRequest> searchCaptor = ArgumentCaptor.forClass(SearchRequest.class);
+		verify(vectorStore).similaritySearch(searchCaptor.capture());
+		assertThat(searchCaptor.getValue().getQuery())
+				.isEqualTo("Can I return a product within seven days?");
+		assertThat(searchCaptor.getValue().getTopK()).isEqualTo(3);
+		assertThat(searchCaptor.getValue().getSimilarityThreshold()).isEqualTo(0.70);
+
+		ArgumentCaptor<List<KnowledgeReference>> referencesCaptor =
+				ArgumentCaptor.forClass(List.class);
+		verify(customerSupportAgent).reply(anyList(), referencesCaptor.capture());
+		assertThat(referencesCaptor.getValue())
+				.extracting(
+						KnowledgeReference::knowledgeDocumentId,
+						KnowledgeReference::documentTitle,
+						KnowledgeReference::content,
+						KnowledgeReference::score
+				)
+				.containsExactly(tuple(
+						1L,
+						"Seven-day return policy",
+						"Eligible products support seven-day no-reason returns.",
+						0.91
+				));
+	}
+
+	@Test
+	void keepsCustomerMessageWhenKnowledgeRetrievalFails() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("RAG Failure Tester");
+		SessionResponse session = conversationService.createSession(createRequest);
+		when(vectorStore.similaritySearch(any(SearchRequest.class)))
+				.thenThrow(new RuntimeException("vector search unavailable"));
+
+		mockMvc.perform(post("/api/conversations/{sessionId}/chat", session.getId())
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+							{"content":"Please answer using the knowledge base."}
+							"""))
+				.andExpect(status().isBadGateway());
+
+		verifyNoInteractions(customerSupportAgent);
+		List<ChatMessage> messages = chatMessageMapper.selectList(
+				Wrappers.<ChatMessage>lambdaQuery()
+						.eq(ChatMessage::getSessionId, session.getId())
+						.orderByAsc(ChatMessage::getId)
+		);
+		assertThat(messages).extracting(ChatMessage::getSenderType, ChatMessage::getContent)
+				.containsExactly(tuple(
+						SenderType.CUSTOMER,
+						"Please answer using the knowledge base."
+				));
 	}
 
 	@Test

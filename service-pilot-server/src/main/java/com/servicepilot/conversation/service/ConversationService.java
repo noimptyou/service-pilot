@@ -10,10 +10,13 @@ import com.servicepilot.conversation.domain.SessionStatus;
 import com.servicepilot.conversation.dto.ChatReplyResponse;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
 import com.servicepilot.conversation.dto.MessageResponse;
+import com.servicepilot.conversation.dto.KnowledgeReferenceResponse;
 import com.servicepilot.conversation.dto.SendMessageRequest;
 import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
+import com.servicepilot.knowledge.KnowledgeReference;
+import com.servicepilot.knowledge.KnowledgeRetriever;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -37,6 +40,8 @@ public class ConversationService {
     private final ChatMessageMapper chatMessageMapper;
 
     private final CustomerSupportAgent customerSupportAgent;
+
+    private final KnowledgeRetriever knowledgeRetriever;
 
     private final TransactionTemplate transactionTemplate;
 
@@ -75,7 +80,13 @@ public class ConversationService {
             throw new IllegalStateException("保存客户消息失败");
         }
 
-        String answer = customerSupportAgent.reply(chatContext.conversation());
+        List<KnowledgeReference> knowledgeReferences = knowledgeRetriever.search(
+                request.getContent().trim()
+        );
+        String answer = customerSupportAgent.reply(
+                chatContext.conversation(),
+                knowledgeReferences
+        );
         ChatMessage aiMessage = transactionTemplate.execute(
                 status -> saveMessage(sessionId, SenderType.AI, answer)
         );
@@ -85,7 +96,10 @@ public class ConversationService {
 
         return new ChatReplyResponse(
                 toMessageResponse(chatContext.customerMessage()),
-                toMessageResponse(aiMessage)
+                toMessageResponse(aiMessage),
+                knowledgeReferences.stream()
+                        .map(this::toKnowledgeReferenceResponse)
+                        .toList()
         );
     }
 
@@ -179,6 +193,16 @@ public class ConversationService {
                 session.getCustomerName(),
                 session.getStatus(),
                 session.getCreatedAt()
+        );
+    }
+
+    private KnowledgeReferenceResponse toKnowledgeReferenceResponse(KnowledgeReference reference) {
+        return new KnowledgeReferenceResponse(
+                reference.knowledgeDocumentId(),
+                reference.documentTitle(),
+                reference.chunkIndex(),
+                reference.content(),
+                reference.score()
         );
     }
 

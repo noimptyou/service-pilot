@@ -2,7 +2,7 @@
 
 > 最后更新：2026-08-30
 > 当前分支：`master`  
-> 当前阶段：管理员 HTTP Basic 认证与 RAG 知识文档入库已完成并通过真实百炼验证
+> 当前阶段：RAG 向量检索与引用回答代码、自动化测试已完成，待真实百炼 RAG 验证
 
 ## 项目目标
 
@@ -130,13 +130,17 @@ POST /api/conversations/{sessionId}/chat
 - `CustomerSupportAgent` 使用 Spring AI `ChatClient` 调用模型。
 - 使用客服 System Prompt 约束回答风格并减少编造。
 - 保存 `CUSTOMER` 消息和 `AI` 回复。
-- 使用 `ChatReplyResponse` 同时返回两条消息。
+- 使用 `ChatReplyResponse` 返回客户消息、AI 回复和知识引用列表。
 - 会话不存在返回 HTTP 404，已关闭返回 HTTP 409，空问题返回 HTTP 400。
 - 模型未启用返回 HTTP 503，模型请求失败或空回复返回 HTTP 502。
 - 从 `chat_message` 读取同一会话最近 20 条有效消息作为模型上下文。
 - 将客户消息映射为 `USER`，将 AI/人工客服消息映射为 `ASSISTANT`。
 - 数据库事务仅负责保存或读取消息，调用百炼时不保持数据库事务。
 - 百炼调用失败时保留已经接收的客户消息，避免问题内容被事务回滚。
+- 每次回答前根据本次问题从 `vector_store` 检索最多 3 个相似知识切片，相似度阈值为 0.70。
+- 将检索结果加入 System Prompt，并要求模型优先依据知识回答、资料不足时不编造。
+- 将知识文档 ID、标题、切片编号、原文和相似度作为 `references` 返回。
+- 知识检索失败返回 HTTP 502，并保留已经接收的客户消息。
 
 ### RAG 知识文档入库接口
 
@@ -181,7 +185,7 @@ SPRING_PROFILES_ACTIVE=ai
 
 后端集成测试使用 JUnit 5、Spring Boot Test、MockMvc、Testcontainers PostgreSQL/pgvector 和 Spring Modulith 结构校验。
 
-当前测试类包含 29 个测试，覆盖：
+当前测试类包含 32 个测试，覆盖：
 
 - 上下文启动、Mapper 注入和 MyBatis-Plus 持久化。
 - 创建会话、发送消息及参数和异常校验。
@@ -193,9 +197,12 @@ SPRING_PROFILES_ACTIVE=ai
 - 知识文档创建、文本切片、向量写入和元数据保存。
 - 空知识内容校验、向量写入失败状态以及匿名访问拒绝。
 - 正确管理员账号允许访问、错误密码返回 401、非管理员用户返回 403。
+- RAG 检索问题、Top 3、0.70 阈值、知识元数据映射和引用响应。
+- 检索失败时保留客户消息，且不调用大模型。
+- 将参考知识加入 Prompt，并防止执行知识内容中的角色命令或提示词。
 - Spring Modulith 模块结构。
 
-2026-08-30 使用 Java 21.0.9 执行全量测试：29 个测试全部通过，0 失败、0 错误；Flyway V5 在 Testcontainers PostgreSQL/pgvector 中成功执行。
+2026-08-30 使用 Java 21.0.9 执行全量测试：32 个测试全部通过，0 失败、0 错误；Flyway V5 在 Testcontainers PostgreSQL/pgvector 中成功执行。
 
 2026-08-30 完成真实知识入库测试：管理员认证成功，知识文档状态为 `READY`、切片数量为 1，百炼 `text-embedding-v4` 生成 1024 维向量并成功写入 `vector_store`；元数据中的文档 ID、标题、来源类型和切片序号均正确。
 
@@ -208,23 +215,23 @@ cd D:\agent\service-pilot-server
 
 ## 下一步开发
 
-当前第一步：**根据客户问题检索相似知识切片，并让 AI 基于检索结果回答和返回引用来源**。
+当前第一步：**使用已入库的退款知识进行一次真实 RAG 问答，确认回答内容和 `references`**。
 
-已实现接口：
+已增强接口：
 
 ```http
-POST /api/knowledge/documents
+POST /api/conversations/{sessionId}/chat
 ```
 
 当前接口处理流程：
 
 ```text
-接收知识标题和原文
-→ 短事务保存 PROCESSING 状态的知识文档
-→ TokenTextSplitter 切分原文
-→ 调用百炼向量模型并写入 vector_store
-→ 短事务将状态更新为 READY 和记录切片数
-→ 返回知识文档创建结果
+接收客户问题并保存 CUSTOMER 消息
+→ 使用问题生成向量并检索最多 3 个相似知识切片
+→ 将聊天历史和参考知识交给 CustomerSupportAgent
+→ 百炼基于参考知识生成回答
+→ 保存 AI 消息
+→ 返回客户消息、AI 回复和 references 引用列表
 ```
 
 本阶段已实现内容：
@@ -237,6 +244,11 @@ POST /api/knowledge/documents
 - Flyway V5：创建 `knowledge_document` 表。
 - 自动化测试：验证成功入库、参数校验、向量写入失败和匿名访问拒绝。
 - 管理员 HTTP Basic 认证：验证管理员身份后才允许上传知识。
+- `KnowledgeRetriever`：定义知识模块公开的检索接口。
+- `VectorKnowledgeRetriever`：使用 Spring AI `VectorStore` 执行相似度检索。
+- `KnowledgeReference`、`KnowledgeReferenceResponse`：传递检索结果并返回引用来源。
+- `CustomerSupportAgent`：将参考知识加入安全约束后的 System Prompt。
+- `ConversationService`：在模型调用前检索知识，并在响应中返回引用列表。
 
 真实多轮验证结果：
 
@@ -247,7 +259,9 @@ POST /api/knowledge/documents
 
 真实向量入库验证已完成：`knowledge_document` 与 `vector_store` 数据正确，短文生成 1 个切片，`chunk_count = 1`、`chunk_index = 0`。
 
-下一项独立功能：**根据客户问题检索相似知识切片，并让 AI 基于检索结果回答和返回引用来源**。
+下一项验证：**重启后端后询问“定制商品支持七天无理由退款吗”，确认 AI 根据已入库知识回答，且 `references` 返回“七天无理由退款规则”**。
+
+验证通过后的下一项独立功能：**订单查询工具调用**。
 
 后续路线：RAG 文档入库 → 向量检索与引用回答 → 订单工具调用 → 人工审批/接管 → 前端界面 → 并发与微服务演进。
 
@@ -256,14 +270,15 @@ POST /api/knowledge/documents
 当前 `master` 与 `origin/master` 均位于：
 
 ```text
-07af909 实现 AI 客服多轮对话上下文
+5206dea 实现 RAG 知识入库与管理员认证
 ```
 
-当前工作区包含尚未提交的 RAG 知识文档入库、管理员 HTTP Basic 认证、Flyway V5、自动化测试和进度文档更新；自动化测试与真实百炼向量入库均已通过，已经具备提交条件。
+当前工作区仅包含尚未提交的 RAG 向量检索、引用回答、自动化测试和进度文档更新；32 个自动化测试已通过，真实 RAG 回答尚待验证。
 
 此前主要提交：
 
 ```text
+5206dea 实现 RAG 知识入库与管理员认证
 07af909 实现 AI 客服多轮对话上下文
 6c7731f 实现 AI 客服自动回复接口
 3c7b6b5 新增 ServicePilot 项目进度记录
