@@ -12,6 +12,7 @@ import com.servicepilot.conversation.domain.HandoffStatus;
 import com.servicepilot.conversation.domain.SenderType;
 import com.servicepilot.conversation.domain.SessionStatus;
 import com.servicepilot.conversation.dto.CreateSessionRequest;
+import com.servicepilot.conversation.dto.SendMessageRequest;
 import com.servicepilot.conversation.dto.SessionResponse;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
@@ -45,11 +46,13 @@ import org.springframework.modulith.core.ApplicationModules;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -67,6 +70,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Import(TestcontainersConfiguration.class)
@@ -168,6 +172,39 @@ class ServicePilotApplicationTests {
 				.andExpect(jsonPath("$.customerName").value("Li Si"))
 				.andExpect(jsonPath("$.status").value("WAITING"))
 				.andExpect(jsonPath("$.createdAt").isNotEmpty());
+	}
+
+	@Test
+	void subscribesToConversationEvents() throws Exception {
+		CreateSessionRequest createRequest = new CreateSessionRequest();
+		createRequest.setCustomerName("SSE customer");
+		SessionResponse session = conversationService.createSession(createRequest);
+
+		MvcResult result = mockMvc.perform(get("/api/conversations/{sessionId}/events", session.getId())
+					.accept(MediaType.TEXT_EVENT_STREAM))
+				.andExpect(status().isOk())
+				.andExpect(request().asyncStarted())
+				.andReturn();
+
+		assertThat(result.getResponse().getContentType())
+				.startsWith(MediaType.TEXT_EVENT_STREAM_VALUE);
+		SendMessageRequest messageRequest = new SendMessageRequest();
+		messageRequest.setContent("Realtime message");
+		conversationService.sendMessage(session.getId(), messageRequest);
+		assertThat(result.getResponse().getContentAsString())
+				.contains("event:message-created")
+				.contains("\"sessionId\":" + session.getId());
+		Objects.requireNonNull(
+				result.getRequest().getAsyncContext(),
+				"SSE request should have an async context"
+		).complete();
+	}
+
+	@Test
+	void rejectsConversationEventSubscriptionForMissingSession() throws Exception {
+		mockMvc.perform(get("/api/conversations/{sessionId}/events", Long.MAX_VALUE)
+					.accept(MediaType.TEXT_EVENT_STREAM))
+				.andExpect(status().isNotFound());
 	}
 
 	@Test

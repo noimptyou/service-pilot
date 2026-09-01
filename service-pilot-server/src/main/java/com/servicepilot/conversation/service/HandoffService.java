@@ -6,9 +6,12 @@ import com.servicepilot.conversation.domain.HandoffRequest;
 import com.servicepilot.conversation.domain.HandoffStatus;
 import com.servicepilot.conversation.domain.SessionStatus;
 import com.servicepilot.conversation.dto.HandoffResponse;
+import com.servicepilot.conversation.event.ConversationStateChanged;
+import com.servicepilot.conversation.event.ConversationStateChangeType;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
 import com.servicepilot.conversation.mapper.HandoffRequestMapper;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +27,8 @@ public class HandoffService {
     private final CustomerSessionMapper customerSessionMapper;
 
     private final HandoffRequestMapper handoffRequestMapper;
+
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public HandoffResponse request(Long sessionId, String reason) {
@@ -45,6 +50,10 @@ public class HandoffService {
         session.setStatus(SessionStatus.HUMAN_REQUESTED);
         session.setUpdatedAt(OffsetDateTime.now());
         customerSessionMapper.updateById(session);
+        eventPublisher.publishEvent(new ConversationStateChanged(
+                sessionId,
+                ConversationStateChangeType.HANDOFF_REQUESTED
+        ));
         return toResponse(handoffRequest);
     }
 
@@ -100,6 +109,10 @@ public class HandoffService {
         session.setStatus(SessionStatus.HUMAN_ACTIVE);
         session.setUpdatedAt(OffsetDateTime.now());
         customerSessionMapper.updateById(session);
+        eventPublisher.publishEvent(new ConversationStateChanged(
+                sessionId,
+                ConversationStateChangeType.HANDOFF_ACCEPTED
+        ));
         return toResponse(request);
     }
 
@@ -116,6 +129,12 @@ public class HandoffService {
             request.setResolvedAt(resolvedAt);
             handoffRequestMapper.updateById(request);
         });
+        if (!activeRequests.isEmpty()) {
+            eventPublisher.publishEvent(new ConversationStateChanged(
+                    sessionId,
+                    ConversationStateChangeType.HANDOFF_RESOLVED
+            ));
+        }
     }
 
     private HandoffRequest findActiveRequest(Long sessionId) {

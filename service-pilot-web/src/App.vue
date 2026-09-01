@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   createSession,
   getApiErrorMessage,
@@ -11,6 +11,7 @@ import {
   sendChatMessage,
   sendCustomerMessage,
 } from './api/conversation'
+import { subscribeConversationEvents } from './api/conversation-events'
 import type {
   HandoffResponse,
   KnowledgeReferenceResponse,
@@ -31,7 +32,8 @@ const isSending = ref(false)
 const isRequestingHandoff = ref(false)
 const isRefreshing = ref(false)
 const messagePanel = ref<HTMLElement | null>(null)
-let refreshTimer: number | undefined
+let refreshQueued = false
+let unsubscribeConversationEvents: (() => void) | undefined
 
 const markdown = new MarkdownIt({
   breaks: false,
@@ -64,20 +66,11 @@ const statusTone = computed(() => {
 onMounted(async () => {
   if (!session.value) return
   customerName.value = session.value.customerName
+  connectConversationEvents()
   await refreshConversation()
 })
 
-onBeforeUnmount(() => stopAutoRefresh())
-
-watch(
-  () => handoff.value?.status,
-  (status) => {
-    stopAutoRefresh()
-    if (status === 'PENDING' || status === 'ACCEPTED') {
-      refreshTimer = window.setInterval(() => void refreshConversation(true), 4_000)
-    }
-  },
-)
+onBeforeUnmount(() => disconnectConversationEvents())
 
 async function handleCreateSession() {
   const normalizedName = customerName.value.trim()
@@ -90,6 +83,7 @@ async function handleCreateSession() {
     messages.value = []
     handoff.value = null
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(created))
+    connectConversationEvents()
   } catch (error) {
     errorMessage.value = getApiErrorMessage(error)
   } finally {
@@ -164,7 +158,11 @@ async function handleRequestHandoff() {
 }
 
 async function refreshConversation(silent = false) {
-  if (!session.value || isRefreshing.value) return
+  if (!session.value) return
+  if (isRefreshing.value) {
+    refreshQueued = true
+    return
+  }
   if (!silent) errorMessage.value = ''
   isRefreshing.value = true
   try {
@@ -180,6 +178,10 @@ async function refreshConversation(silent = false) {
     if (!silent) errorMessage.value = getApiErrorMessage(error)
   } finally {
     isRefreshing.value = false
+    if (refreshQueued) {
+      refreshQueued = false
+      void refreshConversation(true)
+    }
   }
 }
 
@@ -193,7 +195,10 @@ function syncSessionStatus() {
   if (!session.value || !handoff.value) return
   if (handoff.value.status === 'PENDING') session.value.status = 'HUMAN_REQUESTED'
   else if (handoff.value.status === 'ACCEPTED') session.value.status = 'HUMAN_ACTIVE'
-  else if (handoff.value.status === 'RESOLVED') session.value.status = 'CLOSED'
+  else if (handoff.value.status === 'RESOLVED') {
+    session.value.status = 'CLOSED'
+    disconnectConversationEvents()
+  }
   persistSession()
 }
 
@@ -208,7 +213,8 @@ function removeMessage(messageId: number) {
 }
 
 function resetSession() {
-  stopAutoRefresh()
+  disconnectConversationEvents()
+  refreshQueued = false
   localStorage.removeItem(SESSION_STORAGE_KEY)
   session.value = null
   messages.value = []
@@ -233,11 +239,18 @@ function persistSession() {
   if (session.value) localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session.value))
 }
 
-function stopAutoRefresh() {
-  if (refreshTimer !== undefined) {
-    window.clearInterval(refreshTimer)
-    refreshTimer = undefined
-  }
+function connectConversationEvents() {
+  disconnectConversationEvents()
+  if (!session.value || session.value.status === 'CLOSED') return
+  unsubscribeConversationEvents = subscribeConversationEvents(
+    session.value.id,
+    () => void refreshConversation(true),
+  )
+}
+
+function disconnectConversationEvents() {
+  unsubscribeConversationEvents?.()
+  unsubscribeConversationEvents = undefined
 }
 
 async function scrollToLatest() {

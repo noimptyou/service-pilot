@@ -14,11 +14,15 @@ import com.servicepilot.conversation.dto.MessageResponse;
 import com.servicepilot.conversation.dto.KnowledgeReferenceResponse;
 import com.servicepilot.conversation.dto.SendMessageRequest;
 import com.servicepilot.conversation.dto.SessionResponse;
+import com.servicepilot.conversation.event.ConversationMessageCreated;
+import com.servicepilot.conversation.event.ConversationStateChanged;
+import com.servicepilot.conversation.event.ConversationStateChangeType;
 import com.servicepilot.conversation.mapper.ChatMessageMapper;
 import com.servicepilot.conversation.mapper.CustomerSessionMapper;
 import com.servicepilot.knowledge.KnowledgeReference;
 import com.servicepilot.knowledge.KnowledgeRetriever;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -47,6 +51,8 @@ public class ConversationService {
     private final TransactionTemplate transactionTemplate;
 
     private final HandoffService handoffService;
+
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public SessionResponse createSession(CreateSessionRequest request) {
@@ -144,6 +150,10 @@ public class ConversationService {
             customerSessionMapper.updateById(session);
         }
         handoffService.resolveActive(sessionId);
+        eventPublisher.publishEvent(new ConversationStateChanged(
+                sessionId,
+                ConversationStateChangeType.CLOSED
+        ));
         return toSessionResponse(session);
     }
 
@@ -179,6 +189,10 @@ public class ConversationService {
         message.setContent(content.trim());
         message.setCreatedAt(OffsetDateTime.now());
         chatMessageMapper.insert(message);
+        eventPublisher.publishEvent(new ConversationMessageCreated(
+                sessionId,
+                message.getId()
+        ));
         return message;
     }
 
